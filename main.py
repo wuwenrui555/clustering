@@ -1,106 +1,247 @@
-import pandas as pd
-import numpy as np
+# %%
 from pathlib import Path
+
+import anndata as ad
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+
 from subcluster import SubClusterSystem
 
 
 # Create a sample dataset
-def create_sample_dataset(n_units=100, n_features=20):
-    """Create a sample dataset for demonstration."""
-    np.random.seed(42)
+def create_sample_dataset():
+    data_f = "/mnt/nfs/home/wenruiwu/projects/bidmc-jiang-rcc/output/data/20250211_annotation/20250224_combined_dataScaleSize_rm=extreme_fix=CD68_normDAPI_arcsinh=0.01_quantile=1-99.csv"
+    id = "RCC-TMA609(reg_4x5)-dst=reg019-src=reg005"
+    data = pd.read_csv(data_f)
 
-    # Generate random data with some structure (3 clusters)
-    cluster1 = np.random.normal(0, 1, size=(n_units // 3, n_features))
-    cluster2 = np.random.normal(5, 1, size=(n_units // 3, n_features))
-    cluster3 = np.random.normal(-5, 1, size=(n_units // 3, n_features))
+    # data for demo
+    data_demo = data[data["id"].isin([id])].copy()
+    data_demo["cell_id"] = (
+        data_demo["id"].astype(str) + "_c" + data_demo["cellLabel"].astype(str)
+    )
+    data_demo = data_demo.set_index("cell_id")
 
-    # Combine clusters
-    data = np.vstack([cluster1, cluster2, cluster3])
+    obs_columns = ["id", "cellLabel", "cellSize", "Y_cent", "X_cent", "tma"]
+    data_demo_obs = data_demo[obs_columns]
+    data_demo_X = data_demo.drop(columns=obs_columns)
 
-    # Add some noise and variation
-    data += np.random.normal(0, 0.5, size=data.shape)
+    adata = ad.AnnData(data_demo_X)
+    adata.obs = data_demo_obs
+    adata.var_names = data_demo_X.columns.tolist()
 
-    # Create unit IDs and feature names
-    unit_ids = [f"unit_{i}" for i in range(data.shape[0])]
-    feature_names = [f"feature_{i}" for i in range(data.shape[1])]
-
-    # Create DataFrame
-    df = pd.DataFrame(data, index=unit_ids, columns=feature_names)
-
-    return df
+    adata.write_h5ad("input/data_demo.h5ad", compression="gzip")
 
 
-def main():
-    # Create output directory
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+# %%
 
-    # Create sample dataset
-    print("Creating sample dataset...")
-    raw_data = create_sample_dataset()
-    print(f"Dataset shape: {raw_data.shape}")
 
-    # Initialize subclustering system
+def simulate_sequential_clustering():
+    """
+    模拟多次连续聚类并生成summary，所有聚类结果都标记为clear
+    """
+    markers_all = [
+        "CD45",
+        "CD3e",
+        "CD8",
+        "CD4",
+        "FoxP3",
+        "CD20",
+        "CD68",
+        "CD163",
+        "CD16",
+        "CD11b",
+        "MPO",
+        "Cytokeratin",
+        "CD31",
+        "Podoplanin",
+        "aSMA",
+    ]
+
+    # 创建输出目录
+    output_dir = Path("output/sequential_clustering")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 加载数据集
+    print("Loading dataset...")
+    adata = ad.read_h5ad("input/data_demo.h5ad")[0:1000]
+    print(f"Dataset shape: {adata.shape}")
+
+    # 初始化子聚类系统
     print("Initializing subclustering system...")
-    system = SubClusterSystem(raw_data, output_dir)
+    system = SubClusterSystem(adata, output_dir)
 
-    # First clustering: cluster all units using all features
-    print("\nPerforming initial clustering...")
-    unit_ids = raw_data.index.tolist()
-    features = raw_data.columns.tolist()
+    # 第1轮聚类：使用所有细胞，K=3
+    print("\n===== Round 1: Initial clustering with K=3 =====")
+    unit_ids = adata.obs_names.tolist()
 
-    # Use KMeans for simplicity (scanpy/phenograph requires more dependencies)
-    system.perform_clustering(
+    clustering_1 = system.perform_clustering(
         unit_ids=unit_ids,
-        features=features,
+        features=markers_all,
         method="kmeans",
         method_params={"n_clusters": 3, "random_state": 42},
-        annotations={"0": "Type A", "1": "Type B", "2": "Mixed"},
-        tags={"0": "clear", "1": "clear", "2": "unclear"},
     )
 
-    # Update metadata
-    system.manager.export_metadata()
+    # 添加注释和标签（全部设为clear）
+    cluster_names_1 = {
+        "0": "Immune Cells",
+        "1": "Epithelial Cells",
+        "2": "Stromal Cells",
+    }
 
-    # Print summary
-    print("\nClustering summary:")
+    clustering_1 = system.add_annotations_to_clustering(clustering_1, cluster_names_1)
+
+    # 所有标签设为clear
+    cluster_tags_1 = {str(i): "clear" for i in range(3)}
+    clustering_1 = system.add_tags_to_clustering(clustering_1, cluster_tags_1)
+
+    # 保存聚类结果
+    system.save_clustering_result(clustering_1)
+    print("Saved round 1 clustering results")
+    print(f"Clusters: {cluster_names_1}")
+
+    # 创建每个聚类群体的信息
+    cluster_counts = {}
+    for cluster_id in clustering_1.cluster_df["cluster_id"].unique():
+        count = sum(clustering_1.cluster_df["cluster_id"] == cluster_id)
+        cluster_counts[cluster_id] = count
+
+    print(f"Cluster counts: {cluster_counts}")
+
+    # 第2轮聚类：只聚类免疫细胞，K=4
+    print("\n===== Round 2: Subclustering Immune Cells with K=4 =====")
+    # 选择免疫细胞亚群
+    immune_cells = clustering_1.cluster_df[
+        clustering_1.cluster_df["cluster_id"] == "0"
+    ]["unit_id"].tolist()
+
+    clustering_2 = system.perform_clustering(
+        unit_ids=immune_cells,
+        features=markers_all[:8],  # 使用免疫细胞标记物
+        method="kmeans",
+        method_params={"n_clusters": 4, "random_state": 42},
+    )
+
+    # 添加免疫细胞亚群注释和标签
+    cluster_names_2 = {
+        "0": "T Cells",
+        "1": "B Cells",
+        "2": "Macrophages",
+        "3": "Other Immune",
+    }
+
+    clustering_2 = system.add_annotations_to_clustering(clustering_2, cluster_names_2)
+
+    # 所有标签设为clear
+    cluster_tags_2 = {str(i): "clear" for i in range(4)}
+    clustering_2 = system.add_tags_to_clustering(clustering_2, cluster_tags_2)
+
+    # 保存聚类结果
+    system.save_clustering_result(clustering_2)
+    print("Saved round 2 clustering results")
+    print(f"Clusters: {cluster_names_2}")
+
+    # 第3轮聚类：只聚类T细胞，K=3
+    print("\n===== Round 3: Subclustering T Cells with K=3 =====")
+    # 选择T细胞亚群
+    t_cells = clustering_2.cluster_df[clustering_2.cluster_df["cluster_id"] == "0"][
+        "unit_id"
+    ].tolist()
+
+    clustering_3 = system.perform_clustering(
+        unit_ids=t_cells,
+        features=["CD3e", "CD8", "CD4", "FoxP3"],  # T细胞相关标记物
+        method="kmeans",
+        method_params={"n_clusters": 3, "random_state": 42},
+    )
+
+    # 添加T细胞亚群注释和标签
+    cluster_names_3 = {"0": "CD8+ T Cells", "1": "CD4+ T Cells", "2": "Tregs"}
+
+    clustering_3 = system.add_annotations_to_clustering(clustering_3, cluster_names_3)
+
+    # 所有标签设为clear
+    cluster_tags_3 = {str(i): "clear" for i in range(3)}
+    clustering_3 = system.add_tags_to_clustering(clustering_3, cluster_tags_3)
+
+    # 保存聚类结果
+    system.save_clustering_result(clustering_3)
+    print("Saved round 3 clustering results")
+    print(f"Clusters: {cluster_names_3}")
+
+    # 第4轮聚类：只聚类上皮细胞，K=2
+    print("\n===== Round 4: Subclustering Epithelial Cells with K=2 =====")
+    # 选择上皮细胞亚群
+    epithelial_cells = clustering_1.cluster_df[
+        clustering_1.cluster_df["cluster_id"] == "1"
+    ]["unit_id"].tolist()
+
+    clustering_4 = system.perform_clustering(
+        unit_ids=epithelial_cells,
+        features=["Cytokeratin", "CD31"],  # 上皮细胞相关标记物
+        method="kmeans",
+        method_params={"n_clusters": 2, "random_state": 42},
+    )
+
+    # 添加上皮细胞亚群注释和标签
+    cluster_names_4 = {"0": "Tumor Cells", "1": "Normal Epithelium"}
+
+    clustering_4 = system.add_annotations_to_clustering(clustering_4, cluster_names_4)
+
+    # 所有标签设为clear
+    cluster_tags_4 = {str(i): "clear" for i in range(2)}
+    clustering_4 = system.add_tags_to_clustering(clustering_4, cluster_tags_4)
+
+    # 保存聚类结果
+    system.save_clustering_result(clustering_4)
+    print("Saved round 4 clustering results")
+    print(f"Clusters: {cluster_names_4}")
+
+    # 导出summary数据
     summary = system.get_summary()
+    print("\n===== Final clustering summary =====")
+    print(f"Summary shape: {summary.shape}")
     print(summary.head())
 
-    # Select units with "Mixed" annotation for subclustering
-    mixed_units = system.select_units_by_annotation("Mixed")
-    print(
-        f"\nSelected {len(mixed_units)} units with 'Mixed' annotation for subclustering"
+    # 整理列的顺序：unit_id, 聚类结果（按clustering_sequence），最后是annotation和tag
+    desired_columns = ["unit_id", "latest_cluster_id", "annotation", "tag"]
+    cluster_columns = [col for col in summary.columns if col not in desired_columns]
+    ordered_columns = (
+        ["unit_id"] + cluster_columns + ["latest_cluster_id", "annotation", "tag"]
     )
 
-    # Perform subclustering on selected units
-    if mixed_units:
-        print("\nPerforming subclustering on 'Mixed' units...")
-        system.perform_clustering(
-            unit_ids=mixed_units,
-            features=features[:10],  # Use only first 10 features for subclustering
-            method="kmeans",
-            method_params={"n_clusters": 2, "random_state": 42},
-            annotations={"0": "Subtype X", "1": "Subtype Y"},
-            tags={"0": "clear", "1": "clear"},
-        )
+    # 按正确的顺序排序
+    summary_ordered = summary[ordered_columns].sort_values("unit_id")
 
-        # Update metadata
-        system.manager.export_metadata()
+    # 导出最终结果到CSV
+    summary_file = output_dir / "summary.csv"
+    summary_ordered.to_csv(summary_file, index=False)
+    print(f"Exported summary to {summary_file}")
 
-        # Print updated summary
-        print("\nUpdated clustering summary after subclustering:")
-        summary = system.get_summary()
-        print(summary.head())
+    # 创建一个热图显示不同聚类层次的细胞数量分布
+    print("\nCreating cluster distribution heatmap...")
 
-        # Show latest cluster IDs
-        print("\nLatest cluster IDs sample:")
-        latest_ids = summary["latest_cluster_id"].unique()
-        print(f"Unique latest cluster IDs: {latest_ids}")
+    # 生成最终级别的聚类映射表
+    summary_stats = pd.crosstab(summary["annotation"], columns="count").reset_index()
+    summary_stats.columns = ["Cluster", "Cell Count"]
+    summary_stats = summary_stats.sort_values("Cell Count", ascending=False)
 
-    print("\nSubclustering workflow completed successfully!")
-    print(f"Results are saved in: {output_dir.absolute()}")
+    # 创建条形图
+    plt.figure(figsize=(12, 6))
+    sns.barplot(x="Cluster", y="Cell Count", data=summary_stats)
+    plt.title("Cell Distribution Across Final Clusters")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.savefig(output_dir / "cluster_distribution.png")
+
+    print(
+        f"Saved cluster distribution plot to {output_dir / 'cluster_distribution.png'}"
+    )
+
+    return summary_ordered
 
 
+# %%
 if __name__ == "__main__":
-    main()
+    # 运行顺序聚类模拟
+    simulate_sequential_clustering()

@@ -1,9 +1,10 @@
-from pydantic import BaseModel, Field
-from pathlib import Path
-from typing import Union, Dict, Any
-import pandas as pd
 import uuid
+from pathlib import Path
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
+import anndata as ad
+import pandas as pd
+from pydantic import BaseModel, Field
 
 # 1. clustering_sequence: record the sequence of clustering
 # uuid_1, uuid_2, uuid_3, ...
@@ -425,22 +426,37 @@ class SubClusterSystem:
         The directory to store clustering results.
     manager: ClusteringResultManager
         The manager to handle clustering results.
+    adata: ad.AnnData, optional
+        The AnnData object if provided during initialization.
     """
 
-    def __init__(self, raw_data: pd.DataFrame, output_dir: Union[str, Path]):
+    def __init__(
+        self, data: Union[pd.DataFrame, ad.AnnData], output_dir: Union[str, Path]
+    ):
         """
         Initialize the subclustering system.
 
         Parameters:
         -----------
-        raw_data: pd.DataFrame
-            The raw data with unit_id as row index and feature as column index.
+        data: Union[pd.DataFrame, ad.AnnData]
+            The data with unit_id as row index and feature as column index.
+            Can be either pandas DataFrame or AnnData object.
         output_dir: Union[str, Path]
             The directory to store clustering results.
         """
-        self.raw_data = raw_data
+        if isinstance(data, ad.AnnData):
+            self.adata = data
+            self.raw_data = data.to_df()  # Convert to DataFrame for compatibility
+        else:
+            self.raw_data = data
+            self.adata = None
+
         self.output_dir = Path(output_dir)
         self.manager = ClusteringResultManager(output_dir)
+
+        # Store last method and params for reference
+        self._last_method = None
+        self._last_params = None
 
     def perform_clustering(
         self,
@@ -448,9 +464,8 @@ class SubClusterSystem:
         features: list[str],
         method: str = "phenograph",
         method_params: Dict[str, Any] | None = None,
-        annotations: Dict[str, str] | None = None,
-        tags: Dict[str, str] | None = None,
-    ):
+        create_adata: bool = False,
+    ) -> Union[ClusteringResult, Tuple[ClusteringResult, ad.AnnData]]:
         """
         Perform clustering on selected units and features.
 
@@ -464,16 +479,18 @@ class SubClusterSystem:
             The clustering method to use.
         method_params: Dict[str, Any] | None, default=None
             Parameters for the clustering method.
-        annotations: Dict[str, str] | None, default=None
-            Annotations for clusters (cluster_id -> annotation).
-        tags: Dict[str, str] | None, default=None
-            Tags for clusters (cluster_id -> tag).
+        create_adata: bool, default=False
+            Whether to create and return a subset AnnData object with clustering results.
 
         Returns:
         --------
-        ClusteringResult
-            The clustering result.
+        Union[ClusteringResult, Tuple[ClusteringResult, ad.AnnData]]
+            If create_adata=True, returns (ClusteringResult, AnnData), otherwise just ClusteringResult.
         """
+        # Store method info for reference
+        self._last_method = method
+        self._last_params = method_params
+
         # Subset the raw data
         subset_data = self.raw_data.loc[unit_ids, features]
 
@@ -482,65 +499,11 @@ class SubClusterSystem:
 
         # Perform clustering based on the method
         if method == "phenograph":
-            try:
-                import scanpy as sc
-                import scanpy.external as sce
-            except ImportError:
-                raise ImportError(
-                    "scanpy is required for phenograph clustering. Install it with 'pip install scanpy'."
-                )
-
-            # Default parameters for phenograph
-            if method_params is None:
-                method_params = {"k": 30}
-
-            # Create AnnData object
-            adata = sc.AnnData(X=subset_data)
-
-            # Run phenograph
-            sce.tl.phenograph(adata, **method_params)
-
-            # Get cluster assignments
-            cluster_ids = [str(cid) for cid in adata.obs["phenograph"]]
-
+            cluster_ids = self._run_phenograph_clustering(subset_data, method_params)
         elif method == "kmeans":
-            from sklearn.cluster import KMeans
-
-            # Default parameters for kmeans
-            if method_params is None:
-                method_params = {"n_clusters": 8, "random_state": 0}
-
-            # Run kmeans
-            kmeans = KMeans(**method_params)
-            kmeans.fit(subset_data)
-
-            # Get cluster assignments
-            cluster_ids = [str(cid) for cid in kmeans.labels_]
-
+            cluster_ids = self._run_kmeans_clustering(subset_data, method_params)
         elif method == "leiden":
-            try:
-                import scanpy as sc
-            except ImportError:
-                raise ImportError(
-                    "scanpy is required for leiden clustering. Install it with 'pip install scanpy'."
-                )
-
-            # Default parameters for leiden
-            if method_params is None:
-                method_params = {"resolution": 1.0}
-
-            # Create AnnData object
-            adata = sc.AnnData(X=subset_data)
-
-            # Compute neighborhood graph
-            sc.pp.neighbors(adata)
-
-            # Run leiden
-            sc.tl.leiden(adata, **method_params)
-
-            # Get cluster assignments
-            cluster_ids = [str(cid) for cid in adata.obs["leiden"]]
-
+            cluster_ids = self._run_leiden_clustering(subset_data, method_params)
         else:
             raise ValueError(f"Unsupported clustering method: {method}")
 
@@ -549,20 +512,312 @@ class SubClusterSystem:
             unit_id=unit_ids, cluster_id=cluster_ids, clustering_id=clustering_id
         )
 
-        # Add annotations and tags if provided
-        if annotations:
-            clustering_result.add_annotation(annotations)
+        # Create AnnData if requested
+        if create_adata and self.adata is not None:
+            adata_subset = self.create_subclustering_adata(unit_ids, features)
+            adata_subset = self.add_clustering_to_adata(adata_subset, clustering_result)
+            return clustering_result, adata_subset
 
-        if tags:
-            clustering_result.add_tag(tags)
+        return clustering_result
 
+    def create_subclustering_adata(
+        self, unit_ids: list[str], features: Optional[Sequence[str]] = None
+    ) -> ad.AnnData:
+        """
+        Create a subset AnnData object for subclustering.
+
+        Parameters:
+        -----------
+        unit_ids: list[str]
+            The IDs of units to include in the subset.
+        features: Optional[Sequence[str]], optional
+            Features to include. If None, all features are included.
+
+        Returns:
+        --------
+        ad.AnnData
+            A subset AnnData object containing only the specified units and features.
+        """
+        if self.adata is None:
+            raise ValueError(
+                "No AnnData object available. Please initialize with an AnnData object."
+            )
+
+        # Filter by unit_ids
+        valid_ids = [id for id in unit_ids if id in self.adata.obs_names]
+        if not valid_ids:
+            raise ValueError(
+                "None of the specified unit_ids exist in the AnnData object."
+            )
+
+        # AnnData supports list indexing
+        adata_subset = self.adata[valid_ids].copy()
+
+        # Filter by features if specified
+        if features is not None:
+            valid_features = [f for f in features if f in adata_subset.var_names]
+            if not valid_features:
+                raise ValueError("None of the specified features exist in the data.")
+            # AnnData supports list indexing for features
+            adata_subset = adata_subset[:, valid_features]
+
+        return adata_subset
+
+    def add_clustering_to_adata(
+        self,
+        adata: ad.AnnData,
+        clustering_result: ClusteringResult,
+        cluster_name: Optional[str] = None,
+    ) -> ad.AnnData:
+        """
+        Add clustering results to an AnnData object.
+
+        Parameters:
+        -----------
+        adata: ad.AnnData
+            The AnnData object to add clustering results to.
+        clustering_result: ClusteringResult
+            The clustering result to add.
+        cluster_name: Optional[str], optional
+            Name for the clustering column. If None, uses a shortened clustering ID.
+
+        Returns:
+        --------
+        ad.AnnData
+            The updated AnnData object.
+        """
+        # Create a mapping from unit_id to cluster_id
+        unit_to_cluster = dict(
+            zip(clustering_result.unit_id, clustering_result.cluster_id)
+        )
+
+        # Determine cluster column name
+        if cluster_name is None:
+            cluster_name = f"cluster_{clustering_result.clustering_id[:8]}"
+
+        # Add cluster IDs to obs
+        adata.obs[cluster_name] = [
+            unit_to_cluster.get(unit, "NA") for unit in adata.obs_names
+        ]
+        adata.obs[cluster_name] = adata.obs[cluster_name].astype("category")
+
+        # Add annotations if available
+        if "annotation" in clustering_result.cluster_df.columns:
+            # Create mapping from cluster_id to annotation
+            cluster_to_anno = {}
+            for cid in clustering_result.cluster_df["cluster_id"].unique():
+                mask = clustering_result.cluster_df["cluster_id"] == cid
+                if any(mask):
+                    anno_series = clustering_result.cluster_df.loc[mask, "annotation"]
+                    if not anno_series.empty:
+                        anno = anno_series.iloc[0]
+                        cluster_to_anno[cid] = anno
+
+            # Add annotations
+            anno_col = f"{cluster_name}_annotation"
+            adata.obs[anno_col] = [
+                cluster_to_anno.get(adata.obs[cluster_name][i], "")
+                if adata.obs[cluster_name][i] != "NA"
+                else ""
+                for i in range(len(adata.obs))
+            ]
+
+        # Add tags if available
+        if "tag" in clustering_result.cluster_df.columns:
+            # Create mapping from cluster_id to tag
+            cluster_to_tag = {}
+            for cid in clustering_result.cluster_df["cluster_id"].unique():
+                mask = clustering_result.cluster_df["cluster_id"] == cid
+                if any(mask):
+                    tag_series = clustering_result.cluster_df.loc[mask, "tag"]
+                    if not tag_series.empty:
+                        tag = tag_series.iloc[0]
+                        cluster_to_tag[cid] = tag
+
+            # Add tags
+            tag_col = f"{cluster_name}_tag"
+            adata.obs[tag_col] = [
+                cluster_to_tag.get(adata.obs[cluster_name][i], "")
+                if adata.obs[cluster_name][i] != "NA"
+                else ""
+                for i in range(len(adata.obs))
+            ]
+
+        # Store clustering parameters in uns
+        adata.uns[f"{cluster_name}_params"] = {
+            "clustering_id": clustering_result.clustering_id,
+            "method": self._last_method,
+            "method_params": self._last_params,
+            "n_clusters": len(set(clustering_result.cluster_id)),
+        }
+
+        return adata
+
+    def _run_phenograph_clustering(
+        self, data: pd.DataFrame, method_params: Dict[str, Any] | None = None
+    ):
+        """
+        Run phenograph clustering on the data.
+
+        Parameters:
+        -----------
+        data: pd.DataFrame
+            Data to cluster.
+        method_params: Dict[str, Any] | None
+            Parameters for phenograph clustering.
+
+        Returns:
+        --------
+        list[str]
+            Cluster assignments.
+        """
+        try:
+            import scanpy as sc
+            import scanpy.external as sce
+        except ImportError:
+            raise ImportError(
+                "scanpy is required for phenograph clustering. Install it with 'pip install scanpy'."
+            )
+
+        # Default parameters for phenograph
+        if method_params is None:
+            method_params = {"k": 30}
+
+        # Create AnnData object
+        adata = sc.AnnData(X=data)
+
+        # Run phenograph
+        sc.pp.pca(adata)
+        sce.tl.phenograph(adata, **method_params)
+
+        # Get cluster assignments
+        col_cluster = [col for col in adata.obs.columns if "pheno" in col][0]
+        cluster_ids = [str(cid) for cid in adata.obs[col_cluster]]
+
+        return cluster_ids
+
+    def _run_kmeans_clustering(
+        self, data: pd.DataFrame, method_params: Dict[str, Any] | None = None
+    ):
+        """
+        Run kmeans clustering on the data.
+
+        Parameters:
+        -----------
+        data: pd.DataFrame
+            Data to cluster.
+        method_params: Dict[str, Any] | None
+            Parameters for kmeans clustering.
+
+        Returns:
+        --------
+        list[str]
+            Cluster assignments.
+        """
+        from sklearn.cluster import KMeans
+
+        # Default parameters for kmeans
+        if method_params is None:
+            method_params = {"n_clusters": 8, "random_state": 0}
+
+        # Run kmeans
+        kmeans = KMeans(**method_params)
+        kmeans.fit(data)
+
+        # Get cluster assignments
+        cluster_ids = [str(cid) for cid in kmeans.labels_]
+
+        return cluster_ids
+
+    def _run_leiden_clustering(
+        self, data: pd.DataFrame, method_params: Dict[str, Any] | None = None
+    ):
+        """
+        Run leiden clustering on the data.
+
+        Parameters:
+        -----------
+        data: pd.DataFrame
+            Data to cluster.
+        method_params: Dict[str, Any] | None
+            Parameters for leiden clustering.
+
+        Returns:
+        --------
+        list[str]
+            Cluster assignments.
+        """
+        try:
+            import scanpy as sc
+        except ImportError:
+            raise ImportError(
+                "scanpy is required for leiden clustering. Install it with 'pip install scanpy'."
+            )
+
+        # Default parameters for leiden
+        if method_params is None:
+            method_params = {"resolution": 1.0}
+
+        # Create AnnData object
+        adata = sc.AnnData(X=data)
+
+        # Compute neighborhood graph
+        sc.pp.neighbors(adata)
+
+        # Run leiden
+        sc.tl.leiden(adata, **method_params)
+
+        # Get cluster assignments
+        cluster_ids = [str(cid) for cid in adata.obs["leiden"]]
+
+        return cluster_ids
+
+    def add_annotations_to_clustering(
+        self, clustering_result: ClusteringResult, annotations: Dict[str, str]
+    ):
+        """
+        Add annotations to clusters.
+
+        Parameters:
+        -----------
+        clustering_result: ClusteringResult
+            The clustering result to annotate.
+        annotations: Dict[str, str]
+            Annotations for clusters (cluster_id -> annotation).
+        """
+        clustering_result.add_annotation(annotations)
+        return clustering_result
+
+    def add_tags_to_clustering(
+        self, clustering_result: ClusteringResult, tags: Dict[str, str]
+    ):
+        """
+        Add tags to clusters.
+
+        Parameters:
+        -----------
+        clustering_result: ClusteringResult
+            The clustering result to tag.
+        tags: Dict[str, str]
+            Tags for clusters (cluster_id -> tag).
+        """
+        clustering_result.add_tag(tags)
+        return clustering_result
+
+    def save_clustering_result(self, clustering_result: ClusteringResult):
+        """
+        Save the clustering result and export metadata.
+
+        Parameters:
+        -----------
+        clustering_result: ClusteringResult
+            The clustering result to save.
+        """
         # Add the clustering result to the manager
         self.manager.add_clustering_result(clustering_result)
 
         # Export metadata
         self.manager.export_metadata()
-
-        return clustering_result
 
     def get_summary(self) -> pd.DataFrame:
         """
