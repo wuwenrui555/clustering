@@ -65,19 +65,19 @@ class ClusteringResult(BaseModel):
     A class to record the result of clustering and manage the annotation and tag.
     Attributes:
     -----------
-    unit_id: List[str]
-        The id of each unit included in the clustering.
-    cluster_id: List[str]
-        The cluster id assigned to each unit.
     clustering_id: str
         The id of the clustering.
-    output_dir: Union[str, Path]
-        The root directory to store the clustering results.
+    method: str
+        The method used for clustering.
+    unit_ids: List[str]
+        The ids of each unit included in the clustering.
+    cluster_ids: List[str]
+        The cluster ids assigned to each unit.
     cluster_df: pd.DataFrame
         DataFrame to record the clustering result:
         - clustering_id: the id of the clustering process.
-        - unit_id: the id of the unit.
-        - cluster_id: the cluster id assigned to the unit.
+        - unit_ids: the ids of the units.
+        - cluster_ids: the cluster ids assigned to the units.
         - annotation: the annotation for each cluster. If not specified, the
         cluster is non-explicit.
         - tag: the tag for each cluster. It is recommended to specify the tag for
@@ -85,9 +85,10 @@ class ClusteringResult(BaseModel):
         easier to select the non-explicit clusters for next clustering.
     """
 
-    unit_id: list[str]
-    cluster_id: list[str]
     clustering_id: str
+    method: str
+    unit_ids: list[str]
+    cluster_ids: list[str]
     cluster_df: pd.DataFrame = Field(default_factory=pd.DataFrame)
 
     model_config = {"arbitrary_types_allowed": True}
@@ -101,8 +102,9 @@ class ClusteringResult(BaseModel):
         self.cluster_df = pd.DataFrame(
             {
                 "clustering_id": self.clustering_id,
-                "unit_id": self.unit_id,
-                "cluster_id": self.cluster_id,
+                "method": self.method,
+                "unit_ids": self.unit_ids,
+                "cluster_ids": self.cluster_ids,
             }
         )
         return self
@@ -113,17 +115,26 @@ class ClusteringResult(BaseModel):
         Load a clustering result from a csv file.
         """
         cluster_df = pd.read_csv(csv_f)
-        unit_id = cluster_df["unit_id"].tolist()
-        cluster_id = cluster_df["cluster_id"].tolist()
+        unit_ids = cluster_df["unit_ids"].tolist()
+        cluster_ids = cluster_df["cluster_ids"].tolist()
         clustering_id_values = cluster_df["clustering_id"].unique()
+        method_values = cluster_df["method"].unique()
 
         if len(clustering_id_values) != 1:
             raise ValueError("Only one clustering id is allowed.")
+        if len(method_values) != 1:
+            raise ValueError("Only one method is allowed.")
 
         clustering_id = clustering_id_values[0]
+        method = method_values[0]
 
         # Create a new instance with the data from CSV
-        return cls(unit_id=unit_id, cluster_id=cluster_id, clustering_id=clustering_id)
+        return cls(
+            unit_ids=unit_ids,
+            method=method,
+            cluster_ids=cluster_ids,
+            clustering_id=clustering_id,
+        )
 
     def add_annotation(self, annotation: dict[str, str]):
         """
@@ -141,11 +152,11 @@ class ClusteringResult(BaseModel):
 
         # Create a mapping from cluster_id to annotation
         cluster_to_annotation = {}
-        for cluster_id in self.cluster_df["cluster_id"].unique():
+        for cluster_id in self.cluster_df["cluster_ids"].unique():
             cluster_to_annotation[cluster_id] = annotation.get(cluster_id, "")
 
         # Add the annotation column
-        self.cluster_df["annotation"] = self.cluster_df["cluster_id"].map(
+        self.cluster_df["annotation"] = self.cluster_df["cluster_ids"].map(
             cluster_to_annotation
         )
 
@@ -167,26 +178,35 @@ class ClusteringResult(BaseModel):
 
         # Create a mapping from cluster_id to tag
         cluster_to_tag = {}
-        for cluster_id in self.cluster_df["cluster_id"].unique():
+        for cluster_id in self.cluster_df["cluster_ids"].unique():
             cluster_to_tag[cluster_id] = tag.get(cluster_id, "")
 
         # Add the tag column
-        self.cluster_df[tag_name] = self.cluster_df["cluster_id"].map(cluster_to_tag)
+        self.cluster_df[tag_name] = self.cluster_df["cluster_ids"].map(cluster_to_tag)
 
-    def export_clustering_result(self, output_dir: Union[str, Path]):
+    def save(self, output_dir: Union[str, Path]):
         """
-        Export the clustering result to a csv file.
+        Save the clustering result to a csv file.
 
         Parameters:
         -----------
         output_dir: Union[str, Path]
-            The directory to store the result. The clustering result will be saved
-            as `{self.clustering_id}.csv` under the `clustering_results` subdirectory.
+            The directory to store the clustering result. The clustering result
+            will be saved as `{self.clustering_id}.csv` under the `clustering_results`
+            subdirectory.
         """
         output_dir = Path(output_dir)
         output_file = output_dir / "clustering_results" / f"{self.clustering_id}.csv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         self.cluster_df.to_csv(output_file, index=False)
+
+        sequence_file = output_dir / "clustering_sequence.txt"
+        if not sequence_file.exists():
+            with open(sequence_file, "w") as f:
+                f.write(f"{self.clustering_id}\n")
+        else:
+            with open(sequence_file, "a") as f:
+                f.write(f"{self.clustering_id}\n")
 
 
 class ClusteringResultManager(BaseModel):
