@@ -5,8 +5,9 @@ import anndata as ad
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+import PyComplexHeatmap as pch
 
-from subcluster import SubClusterSystem
+from subcluster import SubClusterSystem, ClusteringResult
 
 
 # Create a sample dataset
@@ -31,9 +32,6 @@ def create_sample_dataset():
     adata.var_names = data_demo_X.columns.tolist()
 
     adata.write_h5ad("input/data_demo.h5ad", compression="gzip")
-
-
-# %%
 
 
 def simulate_sequential_clustering():
@@ -65,7 +63,7 @@ def simulate_sequential_clustering():
     # 加载数据集
     print("Loading dataset...")
     adata = ad.read_h5ad("input/data_demo.h5ad")[0:1000]
-    print(f"Dataset shape: {adata.shape}")
+    print(f"Dataset: {adata}")
 
     # 初始化子聚类系统
     print("Initializing subclustering system...")
@@ -79,7 +77,7 @@ def simulate_sequential_clustering():
         unit_ids=unit_ids,
         features=markers_all,
         method="kmeans",
-        method_params={"n_clusters": 3, "random_state": 42},
+        method_params={"n_clusters": 15, "random_state": 42},
     )
 
     # 添加注释和标签（全部设为clear）
@@ -245,3 +243,113 @@ def simulate_sequential_clustering():
 if __name__ == "__main__":
     # 运行顺序聚类模拟
     simulate_sequential_clustering()
+
+
+# %%
+system.adata
+
+unit_ids = clustering_1.unit_id
+cluster_ids = clustering_1.cluster_id
+
+
+# %%
+
+features = markers_all
+clustering_result = clustering_1
+
+
+def plot_cluster_heatmap(
+    adata: ad.AnnData,
+    clustering_result: ClusteringResult,
+    features: list[str],
+    figsize=(10, 8),
+    plot_value: str = "zscore",
+    vmin: float = -2,
+    vmax: float = 2,
+):
+    """
+    Plot a heatmap of the cluster data
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing the cluster data.
+    clustering_result : ClusteringResult
+        ClusteringResult object containing the clustering result.
+    features : list[str]
+        List of features to plot.
+    figsize : tuple, optional
+        Figure size, by default (10, 8).
+    plot_value : str, optional
+        Value to plot, either "zscore" or "mean", by default "zscore"
+    vmin : float, optional
+        Minimum value for color scaling, by default -2
+    vmax : float, optional
+        Maximum value for color scaling, by default 2
+    """
+    metadata = adata.obs
+    unit_ids = adata.obs_names
+    # Fix: Convert cluster_ids to a pandas Series if it's not already
+    cluster_ids = clustering_result.cluster_id
+    clustering_data = adata.to_df().loc[unit_ids][features]
+
+    # value to plot heatmap
+    if plot_value == "zscore":
+        cluster_mean = clustering_data.groupby(cluster_ids).mean()
+        population_mean = clustering_data.mean(axis=0)
+        population_std = clustering_data.std(axis=0)
+        cluster_zscore = (cluster_mean - population_mean) / population_std
+        heatmap_df = cluster_zscore.T
+    elif plot_value == "mean":
+        cluster_mean = clustering_data.groupby(cluster_ids).mean()
+        heatmap_df = cluster_mean.T
+        vmin = 0
+
+    # value to plot subplot
+    cluster_count = pd.Series(cluster_ids).value_counts().to_frame(name="count")
+    cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
+
+    # %%
+    plt.figure(figsize=figsize)
+    col_ha = pch.HeatmapAnnotation(
+        cell_count=pch.anno_barplot(
+            cluster_count, legend=False, colors="grey", height=20
+        ),
+        cell_size=pch.anno_barplot(
+            cluster_mean_cellsize, legend=False, colors="grey", height=20
+        ),
+        verbose=0,
+    )
+
+    heatmap = pch.ClusterMapPlotter(
+        data=heatmap_df,
+        top_annotation=col_ha,
+        col_cluster=True,
+        row_cluster=False,
+        label=plot_value,
+        col_dendrogram=True,
+        col_dendrogram_size=15,
+        show_rownames=True,
+        show_colnames=True,
+        row_names_side="right",
+        tree_kws={"colors": "blue"},
+        verbose=0,
+        legend_gap=5,
+        cmap="RdBu_r",
+        vmin=vmin,
+        vmax=vmax,
+        center=0,
+        xticklabels_kws={"labelrotation": -90, "labelcolor": "blue"},
+    )
+    fig, ax = plt.subplots(figsize=figsize)
+    heatmap.plot(ax=ax)
+    fig.savefig("output/cluster_heatmap.png")
+    plt.show()
+    return heatmap
+
+
+# Example usage:
+# plot_cluster_heatmap(system.adata, clustering_1, markers_all)
+
+
+# %%
