@@ -1,10 +1,12 @@
 # %%
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Union
 
 import anndata as ad
+import matplotlib.pyplot as plt
 import pandas as pd
+import PyComplexHeatmap as pch
 import scanpy as sc
 from pydantic import BaseModel, Field, model_validator
 from sklearn.cluster import KMeans
@@ -339,6 +341,247 @@ def _run_clustering_leiden(
 
 
 # Clustering functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# Plotting functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+PRESET_HEATMAP_KWARGS = {
+    "row_cluster": False,
+    "col_cluster": True,
+    "show_rownames": True,
+    "show_colnames": True,
+    "row_names_side": "right",
+    "col_names_side": "bottom",
+    "col_dendrogram": True,
+    "col_dendrogram_size": 15,
+    "tree_kws": {"colors": "blue"},
+    "cmap": "RdBu_r",
+    "legend_gap": 5,
+    "xticklabels_kws": {"labelrotation": -90, "labelcolor": "blue"},
+    "plot": False,
+    "verbose": 0,
+}
+
+
+def _plot_clustering_heatmap(
+    adata: ad.AnnData,
+    clustering_result: ClusteringResult,
+    features: list[str],
+    plot_value: str = "zscore",
+    preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    **kwargs: dict[str, Any],
+) -> pch.ClusterMapPlotter:
+    """
+    Plot a heatmap of cluster data
+
+    This function creates a heatmap visualization using either z-scores or mean
+    values of features across clusters. The heatmap includes annotations showing
+    cell count and mean cell size for each cluster.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing the cluster data.
+    clustering_result : ClusteringResult
+        Object containing clustering assignments and metadata.
+    features : list[str]
+        List of features (genes/markers) to display in the heatmap.
+    plot_value : str, optional
+        Type of values to plot:
+        - "zscore": Z-score normalized values (default)
+        - "mean": Raw mean values
+    preset_heatmap_kwargs : str, optional
+        Name of preset kwargs dict for PyComplexHeatmap.ClusterMapPlotter.
+        Default is "PRESET_HEATMAP_KWARGS".
+    **kwargs : dict[str, Any]
+        Additional kwargs passed to PyComplexHeatmap.ClusterMapPlotter.
+        Common options include:
+        - vmin, vmax: Value range limits
+        - center: Center value for diverging colormaps
+        - cmap: Colormap name
+        - annot: Show data values in cells
+        See PyComplexHeatmap docs for full list of options.
+
+    Returns
+    -------
+    pch.ClusterMapPlotter
+        Configured heatmap plotter object ready for rendering.
+    """
+    if preset_heatmap_kwargs == "PRESET_HEATMAP_KWARGS":
+        preset_heatmap_kwargs = PRESET_HEATMAP_KWARGS.copy()
+    preset_heatmap_kwargs.update(kwargs)
+
+    unit_ids = clustering_result.unit_ids
+    cluster_ids = clustering_result.cluster_ids
+
+    adata_clustering = adata[unit_ids, features]
+    metadata = adata_clustering.obs
+    clustering_data = adata_clustering.to_df()
+
+    if plot_value == "zscore":
+        cluster_mean = clustering_data.groupby(cluster_ids).mean()
+        population_mean = clustering_data.mean(axis=0)
+        population_std = clustering_data.std(axis=0)
+        cluster_zscore = (cluster_mean - population_mean) / population_std
+        heatmap_df = cluster_zscore.T
+        preset_heatmap_kwargs["label"] = "zscore"
+    elif plot_value == "mean":
+        cluster_mean = clustering_data.groupby(cluster_ids).mean()
+        heatmap_df = cluster_mean.T
+        preset_heatmap_kwargs["label"] = "mean"
+        if preset_heatmap_kwargs["cmap"] == "RdBu_r":
+            preset_heatmap_kwargs["cmap"] = "Reds"
+
+    cluster_count = pd.Series(cluster_ids).value_counts().to_frame(name="count")
+    cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
+
+    col_ha = pch.HeatmapAnnotation(
+        cell_count=pch.anno_barplot(
+            cluster_count, legend=False, colors="grey", height=20
+        ),
+        cell_size=pch.anno_barplot(
+            cluster_mean_cellsize, legend=False, colors="grey", height=20
+        ),
+        verbose=0,
+    )
+
+    cm = pch.ClusterMapPlotter(
+        data=heatmap_df,
+        top_annotation=col_ha,
+        **preset_heatmap_kwargs,
+    )
+    return cm
+
+
+def plot_clustering_heatmap(
+    adata: ad.AnnData,
+    clustering_result: ClusteringResult,
+    features: list[str],
+    figsize: tuple[int, int] = (10, 8),
+    plot_value: str = "zscore",
+    preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    **kwargs: dict[str, Any],
+) -> plt.Figure:
+    """
+    Create a single heatmap figure showing feature patterns across clusters.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing the expression data.
+    clustering_result : ClusteringResult
+        Object containing clustering assignments and metadata.
+    features : list[str]
+        List of features to display.
+    figsize : tuple[int, int], optional
+        Figure dimensions (width, height) in inches, by default (10, 8).
+    plot_value : str, optional
+        Type of values to plot ("zscore" or "mean"), by default "zscore".
+    preset_heatmap_kwargs : str, optional
+        Name of preset kwargs for heatmap, by default "PRESET_HEATMAP_KWARGS".
+    **kwargs : dict[str, Any]
+        Additional kwargs passed to PyComplexHeatmap.ClusterMapPlotter.
+
+    Returns
+    -------
+    plt.Figure
+        The generated figure object.
+    """
+    clustering_id = clustering_result.clustering_id
+    method = clustering_result.method
+
+    cm = _plot_clustering_heatmap(
+        adata,
+        clustering_result,
+        features,
+        plot_value=plot_value,
+        preset_heatmap_kwargs=preset_heatmap_kwargs,
+    )
+
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.suptitle(f"{clustering_id} ({method})")
+    cm.plot(ax=ax)
+    cm.plot_legends(ax=ax)
+
+    return fig
+
+
+def plot_clustering_heatmap_2(
+    adata: ad.AnnData,
+    clustering_result: ClusteringResult,
+    features: list[str],
+    figsize: tuple[int, int] = (20, 8),
+    col_gap: int = 30,
+    legend_hpad: int = 50,
+    preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    kwargs_zscore: dict[str, Any] = {},
+    kwargs_mean: dict[str, Any] = {},
+) -> plt.Figure:
+    """
+    Create a dual heatmap figure showing both z-score and mean value patterns.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing the expression data.
+    clustering_result : ClusteringResult
+        Object containing clustering assignments and metadata.
+    features : list[str]
+        List of features to display.
+    figsize : tuple[int, int], optional
+        Figure dimensions (width, height) in inches, by default (20, 8).
+    col_gap : int, optional
+        Gap between the two heatmaps in pixels, by default 30.
+    legend_hpad : int, optional
+        Horizontal padding for legends in pixels, by default 50.
+    preset_heatmap_kwargs : str, optional
+        Name of preset kwargs for heatmap, by default "PRESET_HEATMAP_KWARGS".
+    kwargs_zscore : dict[str, Any], optional
+        Additional kwargs for z-score heatmap, by default {}.
+    kwargs_mean : dict[str, Any], optional
+        Additional kwargs for mean value heatmap, by default {}.
+
+    Returns
+    -------
+    plt.Figure
+        The generated figure object containing both heatmaps.
+    """
+    clustering_id = clustering_result.clustering_id
+    method = clustering_result.method
+
+    cm_1 = _plot_clustering_heatmap(
+        adata,
+        clustering_result,
+        features,
+        plot_value="zscore",
+        preset_heatmap_kwargs=preset_heatmap_kwargs,
+        **kwargs_zscore,
+    )
+
+    cm_2 = _plot_clustering_heatmap(
+        adata,
+        clustering_result,
+        features,
+        plot_value="mean",
+        preset_heatmap_kwargs=preset_heatmap_kwargs,
+        **kwargs_mean,
+    )
+
+    cmlist = [cm_1, cm_2]
+    fig, ax = plt.subplots(figsize=figsize)
+    ax, legend_axes = pch.composite(
+        cmlist=cmlist, main=0, col_gap=col_gap, legend_hpad=legend_hpad
+    )
+    ax.set_title(
+        f"{clustering_id} ({method})",
+        y=1.05,
+    )
+    plt.close(fig)
+
+    return fig
+
+
+# Plotting functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
 
 class ClusteringResultManager(BaseModel):
     """
