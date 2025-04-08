@@ -5,7 +5,9 @@ from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import anndata as ad
 import pandas as pd
+import scanpy as sc
 from pydantic import BaseModel, Field, model_validator
+from sklearn.cluster import KMeans
 
 # 1. clustering_sequence: record the sequence of clustering
 # uuid_1, uuid_2, uuid_3, ...
@@ -208,6 +210,135 @@ class ClusteringResult(BaseModel):
             with open(sequence_file, "a") as f:
                 f.write(f"{self.clustering_id}\n")
 
+
+# Clustering functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
+def run_clustering(
+    adata: ad.AnnData,
+    unit_ids: list[str],
+    features: list[str],
+    method: str = "phenograph",
+    method_params: Dict[str, Any] | None = None,
+) -> ClusteringResult:
+    """
+    Run clustering on the given data.
+    """
+    match method:
+        case "phenograph":
+            return _run_clustering_phenograph(adata, unit_ids, features, method_params)
+        case "kmeans":
+            return _run_clustering_kmeans(adata, unit_ids, features, method_params)
+        case "leiden":
+            return _run_clustering_leiden(adata, unit_ids, features, method_params)
+        case _:
+            raise ValueError(f"Method {method} not supported.")
+
+
+def _run_clustering_phenograph(
+    adata: ad.AnnData,
+    unit_ids: list[str],
+    features: list[str],
+    method_params: Dict[str, Any] | None = None,
+):
+    """
+    Run clustering using PhenoGraph.
+
+    Parameters:
+    -----------
+    adata: AnnData
+        The AnnData object to cluster.
+    unit_ids: list[str]
+        The unit IDs to cluster.
+    features: list[str]
+        The features to cluster.
+    method_params: dict
+        The parameters for the clustering method.
+
+    Returns:
+    --------
+    ClusteringResult
+    """
+    if method_params is None:
+        method_params = {}
+
+    clustering_id = str(uuid.uuid4())
+    adata_cluster = adata[unit_ids, features].copy()
+    adata_cluster.obs.drop(columns=adata_cluster.obs.columns, inplace=True)
+
+    sc.pp.pca(adata_cluster)
+    sc.external.tl.phenograph(adata_cluster, **method_params)
+
+    cluster_key = adata_cluster.obs.columns[0]
+    cluster_ids = [str(cid) for cid in adata_cluster.obs[cluster_key]]
+    unit_ids = [str(uid) for uid in adata_cluster.obs.index]
+
+    return ClusteringResult(
+        clustering_id=clustering_id,
+        method="phenograph",
+        unit_ids=unit_ids,
+        cluster_ids=cluster_ids,
+    )
+
+
+def _run_clustering_kmeans(
+    adata: ad.AnnData,
+    unit_ids: list[str],
+    features: list[str],
+    method_params: Dict[str, Any] | None = None,
+):
+    """
+    Run clustering using K-means.
+
+    Parameters:
+    -----------
+    adata: AnnData
+        The AnnData object to cluster.
+    unit_ids: list[str]
+        The unit IDs to cluster.
+    features: list[str]
+        The features to cluster.
+    method_params: dict
+        The parameters for the clustering method.
+
+    Returns:
+    --------
+    ClusteringResult
+    """
+    if method_params is None:
+        method_params = {}
+
+    clustering_id = str(uuid.uuid4())
+    adata_cluster = adata[unit_ids, features].copy()
+    adata_cluster.obs.drop(columns=adata_cluster.obs.columns, inplace=True)
+
+    kmeans = KMeans(**method_params)
+    kmeans.fit(adata_cluster.X)
+
+    # Get cluster assignments
+    cluster_ids = [str(cid) for cid in kmeans.labels_]
+    unit_ids = [str(uid) for uid in adata_cluster.obs.index]
+
+    return ClusteringResult(
+        clustering_id=clustering_id,
+        method="kmeans",
+        unit_ids=unit_ids,
+        cluster_ids=cluster_ids,
+    )
+
+
+# TODO: implement leiden clustering
+def _run_clustering_leiden(
+    adata: ad.AnnData,
+    unit_ids: list[str],
+    features: list[str],
+    method_params: Dict[str, Any] | None = None,
+):
+    print("Leiden clustering is not implemented yet.")
+    return None
+
+
+# Clustering functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 class ClusteringResultManager(BaseModel):
     """
