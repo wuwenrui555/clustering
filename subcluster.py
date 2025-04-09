@@ -1096,38 +1096,109 @@ class SubClusterSystem:
 
 
 # %%
-markers_all = [
-    "CD45",
-    "CD3e",
-    "CD8",
-    "CD4",
-    "FoxP3",
-    "CD20",
-    "CD68",
-    "CD163",
-    "CD16",
-    "CD11b",
-    "MPO",
-    "Cytokeratin",
-    "CD31",
-    "Podoplanin",
-    "aSMA",
-]
-adata = ad.read_h5ad("input/data_demo.h5ad")
-unit_ids = adata.obs.index[0:1000].tolist()
-features = markers_all
-adata = adata[unit_ids, features]
-adata.to_df()
 
-method = "phenograph"
+if __name__ == "__main__":
+    # %%
+    markers_all = [
+        "CD45",
+        "CD3e",
+        "CD8",
+        "CD4",
+        "FoxP3",
+        "CD20",
+        "CD68",
+        "CD163",
+        "CD16",
+        "CD11b",
+        "MPO",
+        "Cytokeratin",
+        "CD31",
+        "Podoplanin",
+        "aSMA",
+    ]
+    adata = ad.read_h5ad("input/data_demo.h5ad")
+    unit_ids = adata.obs.index[0:1000].tolist()
+    features = markers_all
 
+    # %%
+    # clustering with phenograph
+    clustering_result = _run_clustering_phenograph(
+        adata, unit_ids, features, method_params={"k": 50}
+    )
 
-# %%
+    # plot heatmap without value limit
+    plot_clustering_heatmap_2(
+        adata,
+        clustering_result,
+        features,
+        figsize=(20, 8),
+        col_gap=30,
+        legend_hpad=60,
+    )
 
+    # plot heatmap with value limit
+    plot_clustering_heatmap_2(
+        adata,
+        clustering_result,
+        features,
+        kwargs_zscore={"vmin": -3, "center": 0, "vmax": 3},
+        kwargs_mean={"vmin": 0, "vmax": 0.5},
+    )
+    # %%
+    # add annotation and tag
+    clustering_result.add_annotation(
+        {"1": "Endothelial", "2": "Muscle-like"},
+    )
+    clustering_result.add_tag(
+        {"3": "T_B", "4": "T_M", "5": "T_B"},
+        tag_name="tag",
+    )
 
-clustering_result = ClusteringResult(
-    unit_id=["1"], cluster_id=["2"], clustering_id="aaa"
-)
-clustering_result
-clustering_result.cluster_df
-# %%
+    # %%
+    plot_clustering_heatmap_2(
+        adata,
+        clustering_result,
+        features,
+        x_label="annotation",
+        kwargs_zscore={"vmin": -3, "center": 0, "vmax": 3},
+        kwargs_mean={"vmin": 0, "vmax": 0.5},
+    )
+
+    plot_clustering_heatmap_2(
+        adata,
+        clustering_result,
+        features,
+        x_label="tag",
+        kwargs_zscore={"vmin": -3, "center": 0, "vmax": 3},
+        kwargs_mean={"vmin": 0, "vmax": 0.5},
+    )
+    # %%
+    # clustering with kmeans
+    clustering_result = _run_clustering_kmeans(
+        adata, unit_ids, features, method_params={"n_clusters": 25, "random_state": 0}
+    )
+
+    # plot heatmap without value limit
+    fig, heatmap = plot_clustering_heatmap(
+        adata, clustering_result, features, plot_value="zscore"
+    )
+    fig, heatmap = plot_clustering_heatmap(
+        adata, clustering_result, features, plot_value="mean"
+    )
+
+    # plot heatmap with value limit
+    fig, heatmap = plot_clustering_heatmap(
+        adata, clustering_result, features, plot_value="zscore", vmin=-3, vmax=3
+    )
+    fig, heatmap = plot_clustering_heatmap(
+        adata, clustering_result, features, plot_value="mean", vmin=0, vmax=0.5
+    )
+
+    # %%
+    # clustering with leiden
+    clustering_result = _run_clustering_leiden(
+        adata, unit_ids, features, method_params={"resolution": 1.0}
+    )
+    fig, heatmap = plot_clustering_heatmap(adata, clustering_result, features)
+
+    fig
