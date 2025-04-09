@@ -64,6 +64,9 @@ from sklearn.cluster import KMeans
 # 5. Repeat the same workflow for the subclustering results.
 
 
+# ClusteringResult >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
 class ClusteringResult(BaseModel):
     """
     A class to record the result of clustering and manage the annotation and tag.
@@ -211,6 +214,9 @@ class ClusteringResult(BaseModel):
         else:
             with open(sequence_file, "a") as f:
                 f.write(f"{self.clustering_id}\n")
+
+
+# ClusteringResult <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 
 # Clustering functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -650,6 +656,9 @@ def plot_clustering_heatmap_2(
 # Plotting functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 
+# ClusteringResultManager >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
 class ClusteringResultManager(BaseModel):
     """
     A class to manage the clustering results and generate metadata matrices.
@@ -785,6 +794,9 @@ class ClusteringResultManager(BaseModel):
         )
         self.non_explicit_df = self.summary_df.query("annotation == ''")
         return self
+
+
+# ClusteringResultManager <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 
 # %%
