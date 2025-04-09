@@ -12,6 +12,11 @@ dependencies = [
     "phenograph>=1.5.7",
     "pycomplexheatmap>=1.8.2",
     "pydantic>=2.11.2",
+    "pyqupath",
     "scanpy>=1.11.1",
     "scikit-learn>=1.5.2",
 ]
+
+[tool.uv.sources]
+anndata = { git = "https://github.com/scverse/anndata.git" }
+pyqupath = { git = "https://github.com/wuwenrui555/pyqupath.git", rev = "v0.0.5" }
