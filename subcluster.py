@@ -656,271 +656,132 @@ class ClusteringResultManager(BaseModel):
     -----------
     output_dir: Union[str, Path]
         The directory to store clustering results.
-    clustering_sequence: list[str]
-        The sequence of clustering IDs.
-    cluster_id_manager: pd.DataFrame
-        A DataFrame that maps unit IDs to cluster IDs across different clustering operations.
-    cluster_labels_manager: pd.DataFrame
-        A DataFrame that maps unit IDs to annotations and tags.
-    summary: pd.DataFrame
-        A combined DataFrame with all clustering information.
+    unit_ids: list[str]
+        All unit ids of the data to be clustered.
+    summary_df: pd.DataFrame
+        The summary DataFrame.
+    non_explicit_df: pd.DataFrame
+        The non-explicit DataFrame (with empty annotation) need to be subclustered.
     """
 
     output_dir: Union[str, Path]
-    clustering_sequence: list[str] = Field(default_factory=list)
-    cluster_id_manager: pd.DataFrame = Field(default_factory=pd.DataFrame)
-    cluster_labels_manager: pd.DataFrame = Field(default_factory=pd.DataFrame)
-    summary: pd.DataFrame = Field(default_factory=pd.DataFrame)
+    unit_ids: list[str]
+    summary_df: pd.DataFrame = Field(default_factory=pd.DataFrame)
+    non_explicit_df: pd.DataFrame = Field(default_factory=pd.DataFrame)
 
     model_config = {"arbitrary_types_allowed": True}
 
-    def __init__(self, output_dir: Union[str, Path]):
+    # Custom initialization using model_validator in Pydantic v2
+    @model_validator(mode="after")
+    def init(self):
         """
         Initialize the clustering result manager.
-
-        Parameters:
-        -----------
-        output_dir: Union[str, Path]
-            The directory to store clustering results.
         """
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.clustering_sequence_file = self.output_dir / "clustering_sequence.txt"
+        self.output_dir = Path(self.output_dir)
+        (self.output_dir / "clustering_results").mkdir(parents=True, exist_ok=True)
 
-        self.results_dir = self.output_dir / "clustering_results"
-        self.results_dir.mkdir(exist_ok=True)
+        clustering_sequence_file = self.output_dir / "clustering_sequence.txt"
 
-        # Load clustering sequence if exists, otherwise initialize as empty list
-        if self.clustering_sequence_file.exists():
-            with open(self.clustering_sequence_file, "r") as f:
-                self.clustering_sequence = [line.strip() for line in f.readlines()]
+        # Load clustering sequence if exists
+        if clustering_sequence_file.exists():
+            with open(clustering_sequence_file, "r") as f:
+                clustering_sequence = [line.strip() for line in f.readlines()]
         else:
-            self.clustering_sequence = []
+            print("No clustering results found.")
+            return self
 
-        # Initialize cluster_id_manager, cluster_labels_manager, and summary
-        self.cluster_id_manager = pd.DataFrame()
-        self.cluster_labels_manager = pd.DataFrame()
-        self.summary = pd.DataFrame()
-
-        # Load existing clustering results if any
-        self._load_existing_clustering_results()
-
-    def _load_existing_clustering_results(self):
-        """
-        Load existing clustering results from the output directory.
-        """
-        if not self.clustering_sequence:
-            return
-        # Initialize cluster_id_manager with unit_id column
-        results_dir = self.results_dir  # type: ignore
-
-        # Create temporary DataFrames to hold all clustering results
-        all_clustering_dfs = []
-
-        # Load each clustering result
-        for clustering_id in self.clustering_sequence:
-            clustering_file = results_dir / f"{clustering_id}.csv"
-            if not clustering_file.exists():
-                continue
-
-            # Load clustering result
-            clustering_df = pd.read_csv(clustering_file)
-            all_clustering_dfs.append(clustering_df)
-
-        if not all_clustering_dfs:
-            return
-
-        # Combine all clustering DFs to get all unique unit_ids
-        combined_df = pd.concat(all_clustering_dfs, ignore_index=True)
-        all_unit_ids = combined_df["unit_id"].unique()
-
-        # Initialize cluster_id_manager with unit_id column
-        self.cluster_id_manager = pd.DataFrame({"unit_id": all_unit_ids})
-
-        # Add clustering result columns to cluster_id_manager
-        for clustering_id in self.clustering_sequence:
-            clustering_file = results_dir / f"{clustering_id}.csv"
-            if not clustering_file.exists():
-                # If clustering result doesn't exist, add empty column
-                self.cluster_id_manager[clustering_id] = ""
-                continue
-
-            # Load clustering result
-            clustering_df = pd.read_csv(clustering_file)
-
-            # Create a mapping from unit_id to cluster_id
-            unit_to_cluster = dict(
-                zip(clustering_df["unit_id"], clustering_df["cluster_id"])
+        clustering_ids = []
+        annotations = []
+        tags = []
+        for clustering_id in clustering_sequence:
+            clustering_file = (
+                self.output_dir / "clustering_results" / f"{clustering_id}.csv"
             )
+            if not clustering_file.exists():
+                raise FileNotFoundError(f"Clustering result not found: {clustering_id}")
+            clustering_df = pd.read_csv(clustering_file)
 
-            # Add column for this clustering
-            self.cluster_id_manager[clustering_id] = self.cluster_id_manager[
-                "unit_id"
-            ].map(lambda unit: unit_to_cluster.get(unit, ""))
-
-        # Generate latest_cluster_id
-        self._generate_latest_cluster_id()
-
-        # Initialize cluster_labels_manager
-        self._update_cluster_labels_manager()
-
-        # Generate summary
-        self._generate_summary()
-
-    def _generate_latest_cluster_id(self):
-        """
-        Generate the latest cluster ID for each unit by concatenating all cluster IDs.
-        """
-
-        def concatenate_clusters(row):
-            cluster_ids = []
-            for clustering_id in self.clustering_sequence:
-                if clustering_id in row and row[clustering_id]:
-                    cluster_ids.append(str(row[clustering_id]))
-            return "_".join(cluster_ids)
-
-        self.cluster_id_manager["latest_cluster_id"] = self.cluster_id_manager.apply(
-            concatenate_clusters, axis=1
-        )
-
-    def _update_cluster_labels_manager(self):
-        """
-        Update the cluster labels manager with the latest annotations and tags.
-        """
-        # Initialize cluster_labels_manager with unit_id and latest_cluster_id
-        self.cluster_labels_manager = self.cluster_id_manager[
-            ["unit_id", "latest_cluster_id"]
-        ].copy()
-
-        # Initialize annotation and tag columns
-        self.cluster_labels_manager["annotation"] = ""
-        self.cluster_labels_manager["tag"] = ""
-
-        # Load the latest clustering result to get annotations and tags
-        if self.clustering_sequence:
-            results_dir = self.output_dir / "clustering_results"  # type: ignore
-            latest_clustering_id = self.clustering_sequence[-1]
-            latest_clustering_file = results_dir / f"{latest_clustering_id}.csv"
-
-            if latest_clustering_file.exists():
-                latest_clustering_df = pd.read_csv(latest_clustering_file)
-
-                # Check if annotation and tag columns exist
-                if "annotation" in latest_clustering_df.columns:
-                    # Create mapping from unit_id to annotation
-                    unit_to_annotation = dict(
-                        zip(
-                            latest_clustering_df["unit_id"],
-                            latest_clustering_df["annotation"],
-                        )
-                    )
-                    self.cluster_labels_manager["annotation"] = (
-                        self.cluster_labels_manager["unit_id"].map(
-                            lambda unit: unit_to_annotation.get(unit, "")
-                        )
-                    )
-
-                if "tag" in latest_clustering_df.columns:
-                    # Create mapping from unit_id to tag
-                    unit_to_tag = dict(
-                        zip(
-                            latest_clustering_df["unit_id"], latest_clustering_df["tag"]
-                        )
-                    )
-                    self.cluster_labels_manager["tag"] = self.cluster_labels_manager[
-                        "unit_id"
-                    ].map(lambda unit: unit_to_tag.get(unit, ""))
-
-    def _generate_summary(self):
-        """
-        Generate a summary DataFrame with all clustering information.
-        """
-        # Merge cluster_id_manager and cluster_labels_manager
-        self.summary = pd.merge(
-            self.cluster_id_manager,
-            self.cluster_labels_manager[["unit_id", "annotation", "tag"]],
-            on="unit_id",
-            how="left",
-        )
-
-    def add_clustering_result(self, clustering_result: ClusteringResult):
-        """
-        Add a new clustering result.
-
-        Parameters:
-        -----------
-        clustering_result: ClusteringResult
-            The clustering result to add.
-        """
-        # Add the clustering_id to the clustering sequence
-        if clustering_result.clustering_id not in self.clustering_sequence:
-            self.clustering_sequence.append(clustering_result.clustering_id)
-
-            # Update the clustering sequence file
-            with open(self.clustering_sequence_file, "w") as f:
-                for clustering_id in self.clustering_sequence:
-                    f.write(f"{clustering_id}\n")
-
-        # Save the clustering result
-        results_dir = self.output_dir / "clustering_results"  # type:ignore
-        results_dir.mkdir(exist_ok=True)
-
-        clustering_file = results_dir / f"{clustering_result.clustering_id}.csv"
-        clustering_result.export_clustering_result(clustering_file)
-
-        # Update the cluster_id_manager
-        # Get all unit IDs
-        all_unit_ids = (
-            set(self.cluster_id_manager["unit_id"])
-            if not self.cluster_id_manager.empty
-            else set()
-        )
-        all_unit_ids.update(clustering_result.unit_id)
-
-        # Initialize or update cluster_id_manager
-        if self.cluster_id_manager.empty:
-            self.cluster_id_manager = pd.DataFrame({"unit_id": list(all_unit_ids)})
-        else:
-            # Ensure all unit IDs are in cluster_id_manager
-            missing_unit_ids = all_unit_ids - set(self.cluster_id_manager["unit_id"])
-            if missing_unit_ids:
-                new_rows = pd.DataFrame({"unit_id": list(missing_unit_ids)})
-                self.cluster_id_manager = pd.concat(
-                    [self.cluster_id_manager, new_rows], ignore_index=True
+            # check if unit_ids is unique
+            if clustering_df["unit_ids"].duplicated().any():
+                raise ValueError(
+                    "Clustering result has multiple unit ids: {clustering_id}"
                 )
 
-        # Add column for this clustering
-        unit_to_cluster = dict(
-            zip(clustering_result.unit_id, clustering_result.cluster_id)
-        )
-        self.cluster_id_manager[clustering_result.clustering_id] = (
-            self.cluster_id_manager["unit_id"].map(
-                lambda unit: unit_to_cluster.get(unit, "")
+            # check if clustering_id is unique
+            clustering_id = clustering_df["clustering_id"].unique()
+            if len(clustering_id) > 1:
+                raise ValueError(
+                    f"Clustering result has multiple clustering ids: {clustering_id}"
+                )
+            else:
+                clustering_id = clustering_id[0]
+
+            # annotations
+            annotations.append(
+                clustering_df[["unit_ids", "annotation", "clustering_id"]]
             )
+
+            # tags
+            tags.append(
+                clustering_df.drop(columns=["annotation", "cluster_ids", "method"])
+            )
+
+            # clustering_id
+            clustering_df = clustering_df.drop(
+                columns=["clustering_id", "method"]
+            ).rename(columns={"cluster_ids": clustering_id})
+            clustering_df[clustering_id] = clustering_df[clustering_id].astype(str)
+            clustering_ids.append(clustering_df[["unit_ids", clustering_id]])
+
+        # latest cluster id
+        clustering_ids = [
+            clustering_id.set_index("unit_ids") for clustering_id in clustering_ids
+        ]
+        clustering_id_df = pd.concat(clustering_ids, axis=1).fillna("")
+        clustering_id_df["latest_cluster_id"] = clustering_id_df.apply(
+            lambda x: "|".join([i for i in x if i != ""]), axis=1
         )
 
-        # Generate latest_cluster_id
-        self._generate_latest_cluster_id()
-
-        # Update cluster_labels_manager
-        self._update_cluster_labels_manager()
-
-        # Generate summary
-        self._generate_summary()
-
-    def export_metadata(self):
-        """
-        Export the metadata matrices (cluster_id_manager, cluster_labels_manager, summary).
-        """
-        self.cluster_id_manager.to_csv(
-            self.output_dir / "cluster_id_manager.csv",
-            index=False,  # type: ignore
+        # annotation
+        annotation_df = pd.concat(annotations, axis=0)
+        annotation_df = annotation_df[
+            (~annotation_df["annotation"].isna()) & (annotation_df["annotation"] != "")
+        ].drop_duplicates()
+        annotation_df_multi = (
+            annotation_df.groupby(["unit_ids", "annotation"])
+            .size()
+            .reset_index(name="count")
+            .query("count > 1")
         )
-        self.cluster_labels_manager.to_csv(
-            self.output_dir / "cluster_labels_manager.csv",
-            index=False,  # type: ignore
+        if len(annotation_df_multi) > 0:
+            raise ValueError(
+                "Clustering result has multiple annotations for the same unit."
+            )
+        annotation_df = annotation_df.set_index("unit_ids")
+
+        # tags
+        tags_df = pd.concat(tags, axis=0)
+        tags_df = tags_df[(~tags_df["tag"].isna()) & (tags_df["tag"] != "")]
+        tags_columns = tags_df.drop(columns=["unit_ids", "clustering_id"]).columns
+
+        tag_dfs = []
+        for tag_column in tags_columns:
+            tag_df = (
+                tags_df.groupby(["unit_ids"])[tag_column]
+                .apply(lambda x: "|".join([i for i in x if i != ""]))
+                .to_frame(name=tag_column)
+            )
+            tag_dfs.append(tag_df)
+        tags_df = pd.concat(tag_dfs, axis=1)
+
+        summary_df = pd.concat([clustering_id_df, annotation_df, tags_df], axis=1)
+        self.summary_df = (
+            pd.DataFrame(index=self.unit_ids)
+            .merge(summary_df, left_index=True, right_index=True, how="left")
+            .fillna("")
         )
-        self.summary.to_csv(self.output_dir / "summary.csv", index=False)  # type: ignore
+        self.non_explicit_df = self.summary_df.query("annotation == ''")
+        return self
 
 
 class SubClusterSystem:
@@ -1119,6 +980,12 @@ if __name__ == "__main__":
     adata = ad.read_h5ad("input/data_demo.h5ad")
     unit_ids = adata.obs.index[0:1000].tolist()
     features = markers_all
+
+    manager = ClusteringResultManager(
+        output_dir="output/clustering_demo", unit_ids=adata.obs.index
+    )
+    manager.summary_df
+    manager.non_explicit_df
 
     # %%
     # clustering with phenograph
