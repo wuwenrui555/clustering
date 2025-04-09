@@ -799,6 +799,46 @@ class ClusteringResultManager(BaseModel):
 # ClusteringResultManager <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 
+# Custom functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
+def update_geojson_from_clustering_result(
+    geojson_file: Union[str, Path],
+    clustering_result: ClusteringResult,
+    output_dir: Union[str, Path],
+):
+    try:
+        from pyqupath.geojson import GeojsonProcessor
+    except ImportError:
+        raise ImportError(
+            "pyqupath is not installed. Please install it using `pip install git+https://github.com/wuwenrui555/pyqupath.git@v0.0.5`."
+        )
+
+    geojson_file = Path(geojson_file)
+    geojson = GeojsonProcessor.from_path(geojson_file)
+
+    cluster_df = clustering_result.cluster_df[["unit_ids", "cluster_ids"]].copy()
+    cluster_df["id"] = cluster_df["unit_ids"].str.split(r"_(?=c\d)").str[0]
+    cluster_df["cell_label"] = cluster_df["unit_ids"].str.split(r"_c(?=\d)").str[1]
+    name_dict = (
+        cluster_df[cluster_df["id"] == geojson_file.stem]
+        .set_index("cell_label")["cluster_ids"]
+        .to_dict()
+    )
+    # select the cells involved in the clustering
+    geojson.gdf = geojson.gdf[geojson.gdf["name"].isin(name_dict.keys())]
+    geojson.update_classification(name_dict)
+
+    output_dir = Path(output_dir)
+    output_file = (
+        output_dir / "geojson" / clustering_result.clustering_id / geojson_file.name
+    )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    geojson.output_geojson(output_file)
+
+
+# Custom functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
 # %%
 if __name__ == "__main__":
     # %%
