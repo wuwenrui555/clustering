@@ -763,13 +763,14 @@ class ClusteringResultManager(BaseModel):
 
         # tags
         tags_df = pd.concat(tags, axis=0)
-        tags_df = tags_df[(~tags_df["tag"].isna()) & (tags_df["tag"] != "")]
         tags_columns = tags_df.drop(columns=["unit_ids", "clustering_id"]).columns
 
         tag_dfs = []
         for tag_column in tags_columns:
+            tag_df = tags_df[["unit_ids", tag_column]]
+            tag_df = tag_df[(~tag_df[tag_column].isna()) & (tag_df[tag_column] != "")]
             tag_df = (
-                tags_df.groupby(["unit_ids"])[tag_column]
+                tag_df.groupby(["unit_ids"])[tag_column]
                 .apply(lambda x: "|".join([i for i in x if i != ""]))
                 .to_frame(name=tag_column)
             )
