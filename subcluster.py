@@ -367,6 +367,7 @@ def _plot_clustering_heatmap(
     clustering_result: ClusteringResult,
     features: list[str],
     plot_value: str = "zscore",
+    x_label: str = "cluster",
     preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
     **kwargs: dict[str, Any],
 ) -> pch.ClusterMapPlotter:
@@ -389,6 +390,12 @@ def _plot_clustering_heatmap(
         Type of values to plot:
         - "zscore": Z-score normalized values (default)
         - "mean": Raw mean values
+    x_label : str, optional
+        Label for the x-axis, by default "cluster". Can be "cluster", "annotation",
+        or "tag". If "cluster", the cluster IDs will be used as the x-axis labels.
+        If "annotation" or "tag", the annotation or tag will be used as the x-axis
+        labels if they are not empty. Otherwise, the cluster IDs will be used as
+        the x-axis labels.
     preset_heatmap_kwargs : str, optional
         Name of preset kwargs dict for PyComplexHeatmap.ClusterMapPlotter.
         Default is "PRESET_HEATMAP_KWARGS".
@@ -430,9 +437,46 @@ def _plot_clustering_heatmap(
         preset_heatmap_kwargs["label"] = "mean"
         if preset_heatmap_kwargs["cmap"] == "RdBu_r":
             preset_heatmap_kwargs["cmap"] = "Reds"
+    else:
+        raise ValueError(f"Invalid plot_value: {plot_value}")
 
     cluster_count = pd.Series(cluster_ids).value_counts().to_frame(name="count")
     cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
+
+    if x_label == "cluster":
+        pass
+    elif x_label in clustering_result.cluster_df.columns:
+        if x_label == "annotation":
+            columns = ["annotation", "cluster_ids"]
+        elif "annotation" in clustering_result.cluster_df.columns:
+            columns = [x_label, "annotation", "cluster_ids"]
+        else:
+            columns = [x_label, "cluster_ids"]
+        x_label_df = clustering_result.cluster_df[columns].drop_duplicates()
+
+        for i, column in enumerate(columns):
+            if i == 0:
+                new_labels = x_label_df[column]
+            else:
+                new_labels[new_labels == ""] = x_label_df.loc[new_labels == "", column]
+        x_label_df = pd.DataFrame(
+            {"x_label": new_labels, "cluster_ids": x_label_df["cluster_ids"]}
+        ).set_index("cluster_ids")
+
+        # Handle duplicate x_labels by appending numbers
+        x_label_df["x_label"] = x_label_df.groupby("x_label")["x_label"].transform(
+            lambda x: x if len(x) == 1 else [f"{v}({i + 1})" for i, v in enumerate(x)]
+        )
+        x_label_dict = x_label_df["x_label"].to_dict()
+
+        heatmap_df.columns = heatmap_df.columns.map(x_label_dict)
+        cluster_count.index = cluster_count.index.map(x_label_dict)
+        cluster_mean_cellsize.index = cluster_mean_cellsize.index.map(x_label_dict)
+
+    else:
+        raise ValueError(
+            f"Invalid x_label: {x_label}. Must be one of: cluster, annotation, tag"
+        )
 
     col_ha = pch.HeatmapAnnotation(
         cell_count=pch.anno_barplot(
@@ -458,6 +502,7 @@ def plot_clustering_heatmap(
     features: list[str],
     figsize: tuple[int, int] = (10, 8),
     plot_value: str = "zscore",
+    x_label: str = "cluster",
     preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
     **kwargs: dict[str, Any],
 ) -> plt.Figure:
@@ -476,6 +521,12 @@ def plot_clustering_heatmap(
         Figure dimensions (width, height) in inches, by default (10, 8).
     plot_value : str, optional
         Type of values to plot ("zscore" or "mean"), by default "zscore".
+    x_label : str, optional
+        Label for the x-axis, by default "cluster". Can be "cluster", "annotation",
+        or "tag". If "cluster", the cluster IDs will be used as the x-axis labels.
+        If "annotation" or "tag", the annotation or tag will be used as the x-axis
+        labels if they are not empty. Otherwise, the cluster IDs will be used as
+        the x-axis labels.
     preset_heatmap_kwargs : str, optional
         Name of preset kwargs for heatmap, by default "PRESET_HEATMAP_KWARGS".
     **kwargs : dict[str, Any]
@@ -494,6 +545,7 @@ def plot_clustering_heatmap(
         clustering_result,
         features,
         plot_value=plot_value,
+        x_label=x_label,
         preset_heatmap_kwargs=preset_heatmap_kwargs,
     )
 
@@ -510,6 +562,7 @@ def plot_clustering_heatmap_2(
     clustering_result: ClusteringResult,
     features: list[str],
     figsize: tuple[int, int] = (20, 8),
+    x_label: str = "cluster",
     col_gap: int = 30,
     legend_hpad: int = 50,
     preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
@@ -529,6 +582,12 @@ def plot_clustering_heatmap_2(
         List of features to display.
     figsize : tuple[int, int], optional
         Figure dimensions (width, height) in inches, by default (20, 8).
+    x_label : str, optional
+        Label for the x-axis, by default "cluster". Can be "cluster", "annotation",
+        or "tag". If "cluster", the cluster IDs will be used as the x-axis labels.
+        If "annotation" or "tag", the annotation or tag will be used as the x-axis
+        labels if they are not empty. Otherwise, the cluster IDs will be used as
+        the x-axis labels.
     col_gap : int, optional
         Gap between the two heatmaps in pixels, by default 30.
     legend_hpad : int, optional
@@ -553,6 +612,7 @@ def plot_clustering_heatmap_2(
         clustering_result,
         features,
         plot_value="zscore",
+        x_label=x_label,
         preset_heatmap_kwargs=preset_heatmap_kwargs,
         **kwargs_zscore,
     )
@@ -562,6 +622,7 @@ def plot_clustering_heatmap_2(
         clustering_result,
         features,
         plot_value="mean",
+        x_label=x_label,
         preset_heatmap_kwargs=preset_heatmap_kwargs,
         **kwargs_mean,
     )
@@ -569,7 +630,11 @@ def plot_clustering_heatmap_2(
     cmlist = [cm_1, cm_2]
     fig, ax = plt.subplots(figsize=figsize)
     ax, legend_axes = pch.composite(
-        cmlist=cmlist, main=0, col_gap=col_gap, legend_hpad=legend_hpad
+        cmlist=cmlist,
+        main=0,
+        col_gap=col_gap,
+        legend_hpad=legend_hpad,
+        verbose=0,
     )
     ax.set_title(
         f"{clustering_id} ({method})",
