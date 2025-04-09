@@ -1,10 +1,15 @@
+# %%
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Union
 
 import anndata as ad
+import matplotlib.pyplot as plt
 import pandas as pd
-from pydantic import BaseModel, Field
+import PyComplexHeatmap as pch
+import scanpy as sc
+from pydantic import BaseModel, Field, model_validator
+from sklearn.cluster import KMeans
 
 # 1. clustering_sequence: record the sequence of clustering
 # uuid_1, uuid_2, uuid_3, ...
@@ -62,20 +67,21 @@ from pydantic import BaseModel, Field
 class ClusteringResult(BaseModel):
     """
     A class to record the result of clustering and manage the annotation and tag.
-
     Attributes:
     -----------
-    unit_id: list[str]
-        The id of each unit included in the clustering.
-    cluster_id: list[str]
-        The cluster id assigned to each unit.
     clustering_id: str
         The id of the clustering.
+    method: str
+        The method used for clustering.
+    unit_ids: List[str]
+        The ids of each unit included in the clustering.
+    cluster_ids: List[str]
+        The cluster ids assigned to each unit.
     cluster_df: pd.DataFrame
         DataFrame to record the clustering result:
         - clustering_id: the id of the clustering process.
-        - cell_id: the id of the unit.
-        - cluster_id: the cluster id assigned to the unit.
+        - unit_ids: the ids of the units.
+        - cluster_ids: the cluster ids assigned to the units.
         - annotation: the annotation for each cluster. If not specified, the
         cluster is non-explicit.
         - tag: the tag for each cluster. It is recommended to specify the tag for
@@ -83,21 +89,55 @@ class ClusteringResult(BaseModel):
         easier to select the non-explicit clusters for next clustering.
     """
 
-    unit_id: list[str]
-    cluster_id: list[str]
     clustering_id: str
+    method: str
+    unit_ids: list[str]
+    cluster_ids: list[str]
     cluster_df: pd.DataFrame = Field(default_factory=pd.DataFrame)
 
     model_config = {"arbitrary_types_allowed": True}
 
-    def __init__(self, **data):
-        super().__init__(**data)
+    # Custom initialization using model_validator in Pydantic v2
+    @model_validator(mode="after")
+    def init(self):
+        """
+        Initialization after model validation.
+        """
         self.cluster_df = pd.DataFrame(
             {
                 "clustering_id": self.clustering_id,
-                "unit_id": self.unit_id,
-                "cluster_id": self.cluster_id,
+                "method": self.method,
+                "unit_ids": self.unit_ids,
+                "cluster_ids": self.cluster_ids,
             }
+        )
+        return self
+
+    @classmethod
+    def from_csv(cls, csv_f: Union[str, Path]):
+        """
+        Load a clustering result from a csv file.
+        """
+        cluster_df = pd.read_csv(csv_f)
+        unit_ids = cluster_df["unit_ids"].tolist()
+        cluster_ids = cluster_df["cluster_ids"].tolist()
+        clustering_id_values = cluster_df["clustering_id"].unique()
+        method_values = cluster_df["method"].unique()
+
+        if len(clustering_id_values) != 1:
+            raise ValueError("Only one clustering id is allowed.")
+        if len(method_values) != 1:
+            raise ValueError("Only one method is allowed.")
+
+        clustering_id = clustering_id_values[0]
+        method = method_values[0]
+
+        # Create a new instance with the data from CSV
+        return cls(
+            unit_ids=unit_ids,
+            method=method,
+            cluster_ids=cluster_ids,
+            clustering_id=clustering_id,
         )
 
     def add_annotation(self, annotation: dict[str, str]):
@@ -109,17 +149,22 @@ class ClusteringResult(BaseModel):
         annotation: dict[str, str]
             The annotation for each cluster with key as the cluster id and value as the annotation.
         """
+        # Overwrite the existing annotation column
+        if "annotation" in self.cluster_df.columns:
+            self.cluster_df = self.cluster_df.drop(columns=["annotation"])
+            print("Overwrite the existing annotation column.")
+
         # Create a mapping from cluster_id to annotation
         cluster_to_annotation = {}
-        for cluster_id in self.cluster_df["cluster_id"].unique():
+        for cluster_id in self.cluster_df["cluster_ids"].unique():
             cluster_to_annotation[cluster_id] = annotation.get(cluster_id, "")
 
         # Add the annotation column
-        self.cluster_df["annotation"] = self.cluster_df["cluster_id"].map(
+        self.cluster_df["annotation"] = self.cluster_df["cluster_ids"].map(
             cluster_to_annotation
         )
 
-    def add_tag(self, tag: dict[str, str]):
+    def add_tag(self, tag: dict[str, str], tag_name: str = "tag"):
         """
         Add tag to the non-explicit clusters.
 
@@ -127,774 +172,726 @@ class ClusteringResult(BaseModel):
         -----------
         tag: dict[str, str]
             The tag for each cluster with key as the cluster id and value as the tag.
+        tag_name: str
+            The name of the tag column.
         """
+        # Overwrite the existing tag column
+        if tag_name in self.cluster_df.columns:
+            self.cluster_df = self.cluster_df.drop(columns=[tag_name])
+            print(f"Overwrite the existing {tag_name} column.")
+
         # Create a mapping from cluster_id to tag
         cluster_to_tag = {}
-        for cluster_id in self.cluster_df["cluster_id"].unique():
+        for cluster_id in self.cluster_df["cluster_ids"].unique():
             cluster_to_tag[cluster_id] = tag.get(cluster_id, "")
 
         # Add the tag column
-        self.cluster_df["tag"] = self.cluster_df["cluster_id"].map(cluster_to_tag)
+        self.cluster_df[tag_name] = self.cluster_df["cluster_ids"].map(cluster_to_tag)
 
-    def export_clustering_result(self, output_file: Union[str, Path]):
+    def save(self, output_dir: Union[str, Path]):
         """
-        Export the clustering result to a csv file.
+        Save the clustering result to a csv file.
 
         Parameters:
         -----------
-        output_file: Union[str, Path]
-            The path to the output file.
+        output_dir: Union[str, Path]
+            The directory to store the clustering result. The clustering result
+            will be saved as `{self.clustering_id}.csv` under the `clustering_results`
+            subdirectory.
         """
+        output_dir = Path(output_dir)
+        output_file = output_dir / "clustering_results" / f"{self.clustering_id}.csv"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         self.cluster_df.to_csv(output_file, index=False)
 
+        sequence_file = output_dir / "clustering_sequence.txt"
+        if not sequence_file.exists():
+            with open(sequence_file, "w") as f:
+                f.write(f"{self.clustering_id}\n")
+        else:
+            with open(sequence_file, "a") as f:
+                f.write(f"{self.clustering_id}\n")
 
-class ClusteringResultManager:
+
+# Clustering functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
+def run_clustering(
+    adata: ad.AnnData,
+    unit_ids: list[str],
+    features: list[str],
+    method: str = "phenograph",
+    method_params: Dict[str, Any] | None = None,
+) -> ClusteringResult:
+    """
+    Run clustering on the given data.
+    """
+    match method:
+        case "phenograph":
+            return _run_clustering_phenograph(adata, unit_ids, features, method_params)
+        case "kmeans":
+            return _run_clustering_kmeans(adata, unit_ids, features, method_params)
+        case "leiden":
+            return _run_clustering_leiden(adata, unit_ids, features, method_params)
+        case _:
+            raise ValueError(f"Method {method} not supported.")
+
+
+def _run_clustering_phenograph(
+    adata: ad.AnnData,
+    unit_ids: list[str],
+    features: list[str],
+    method_params: Dict[str, Any] | None = None,
+):
+    """
+    Run clustering using PhenoGraph.
+
+    Parameters:
+    -----------
+    adata: AnnData
+        The AnnData object to cluster.
+    unit_ids: list[str]
+        The unit IDs to cluster.
+    features: list[str]
+        The features to cluster.
+    method_params: dict
+        The parameters for the clustering method.
+
+    Returns:
+    --------
+    ClusteringResult
+    """
+    if method_params is None:
+        method_params = {}
+
+    clustering_id = str(uuid.uuid4())
+    adata_cluster = adata[unit_ids, features].copy()
+    adata_cluster.obs.drop(columns=adata_cluster.obs.columns, inplace=True)
+
+    sc.pp.pca(adata_cluster)
+    sc.external.tl.phenograph(adata_cluster, **method_params)
+
+    cluster_key = adata_cluster.obs.columns[0]
+    cluster_ids = [str(cid) for cid in adata_cluster.obs[cluster_key]]
+    unit_ids = [str(uid) for uid in adata_cluster.obs.index]
+
+    return ClusteringResult(
+        clustering_id=clustering_id,
+        method="phenograph",
+        unit_ids=unit_ids,
+        cluster_ids=cluster_ids,
+    )
+
+
+def _run_clustering_kmeans(
+    adata: ad.AnnData,
+    unit_ids: list[str],
+    features: list[str],
+    method_params: Dict[str, Any] | None = None,
+):
+    """
+    Run clustering using K-means.
+
+    Parameters:
+    -----------
+    adata: AnnData
+        The AnnData object to cluster.
+    unit_ids: list[str]
+        The unit IDs to cluster.
+    features: list[str]
+        The features to cluster.
+    method_params: dict
+        The parameters for the clustering method.
+
+    Returns:
+    --------
+    ClusteringResult
+    """
+    if method_params is None:
+        method_params = {}
+
+    clustering_id = str(uuid.uuid4())
+    adata_cluster = adata[unit_ids, features].copy()
+    adata_cluster.obs.drop(columns=adata_cluster.obs.columns, inplace=True)
+
+    kmeans = KMeans(**method_params)
+    kmeans.fit(adata_cluster.X)
+
+    # Get cluster assignments
+    cluster_ids = [str(cid) for cid in kmeans.labels_]
+    unit_ids = [str(uid) for uid in adata_cluster.obs.index]
+
+    return ClusteringResult(
+        clustering_id=clustering_id,
+        method="kmeans",
+        unit_ids=unit_ids,
+        cluster_ids=cluster_ids,
+    )
+
+
+# TODO: implement leiden clustering
+def _run_clustering_leiden(
+    adata: ad.AnnData,
+    unit_ids: list[str],
+    features: list[str],
+    method_params: Dict[str, Any] | None = None,
+):
+    print("Leiden clustering is not implemented yet.")
+    return None
+
+
+# Clustering functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# Plotting functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+PRESET_HEATMAP_KWARGS = {
+    "row_cluster": False,
+    "col_cluster": True,
+    "show_rownames": True,
+    "show_colnames": True,
+    "row_names_side": "right",
+    "col_names_side": "bottom",
+    "col_dendrogram": True,
+    "col_dendrogram_size": 15,
+    "tree_kws": {"colors": "blue"},
+    "cmap": "RdBu_r",
+    "legend_gap": 5,
+    "xticklabels_kws": {"labelrotation": -90, "labelcolor": "blue"},
+    "plot": False,
+    "verbose": 0,
+}
+
+
+def _plot_clustering_heatmap(
+    adata: ad.AnnData,
+    clustering_result: ClusteringResult,
+    features: list[str],
+    plot_value: str = "zscore",
+    x_label: str = "cluster",
+    preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    **kwargs: dict[str, Any],
+) -> pch.ClusterMapPlotter:
+    """
+    Plot a heatmap of cluster data
+
+    This function creates a heatmap visualization using either z-scores or mean
+    values of features across clusters. The heatmap includes annotations showing
+    cell count and mean cell size for each cluster.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing the cluster data.
+    clustering_result : ClusteringResult
+        Object containing clustering assignments and metadata.
+    features : list[str]
+        List of features (genes/markers) to display in the heatmap.
+    plot_value : str, optional
+        Type of values to plot:
+        - "zscore": Z-score normalized values (default)
+        - "mean": Raw mean values
+    x_label : str, optional
+        Label for the x-axis, by default "cluster". Can be "cluster", "annotation",
+        or "tag". If "cluster", the cluster IDs will be used as the x-axis labels.
+        If "annotation" or "tag", the annotation or tag will be used as the x-axis
+        labels if they are not empty. Otherwise, the cluster IDs will be used as
+        the x-axis labels.
+    preset_heatmap_kwargs : str, optional
+        Name of preset kwargs dict for PyComplexHeatmap.ClusterMapPlotter.
+        Default is "PRESET_HEATMAP_KWARGS".
+    **kwargs : dict[str, Any]
+        Additional kwargs passed to PyComplexHeatmap.ClusterMapPlotter.
+        Common options include:
+        - vmin, vmax: Value range limits
+        - center: Center value for diverging colormaps
+        - cmap: Colormap name
+        - annot: Show data values in cells
+        See PyComplexHeatmap docs for full list of options.
+
+    Returns
+    -------
+    pch.ClusterMapPlotter
+        Configured heatmap plotter object ready for rendering.
+    """
+    if preset_heatmap_kwargs == "PRESET_HEATMAP_KWARGS":
+        preset_heatmap_kwargs = PRESET_HEATMAP_KWARGS.copy()
+    preset_heatmap_kwargs.update(kwargs)
+
+    unit_ids = clustering_result.unit_ids
+    cluster_ids = clustering_result.cluster_ids
+
+    adata_clustering = adata[unit_ids, features]
+    metadata = adata_clustering.obs
+    clustering_data = adata_clustering.to_df()
+
+    if plot_value == "zscore":
+        cluster_mean = clustering_data.groupby(cluster_ids).mean()
+        population_mean = clustering_data.mean(axis=0)
+        population_std = clustering_data.std(axis=0)
+        cluster_zscore = (cluster_mean - population_mean) / population_std
+        heatmap_df = cluster_zscore.T
+        preset_heatmap_kwargs["label"] = "zscore"
+    elif plot_value == "mean":
+        cluster_mean = clustering_data.groupby(cluster_ids).mean()
+        heatmap_df = cluster_mean.T
+        preset_heatmap_kwargs["label"] = "mean"
+        if preset_heatmap_kwargs["cmap"] == "RdBu_r":
+            preset_heatmap_kwargs["cmap"] = "Reds"
+    else:
+        raise ValueError(f"Invalid plot_value: {plot_value}")
+
+    cluster_count = pd.Series(cluster_ids).value_counts().to_frame(name="count")
+    cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
+
+    if x_label == "cluster":
+        pass
+    elif x_label in clustering_result.cluster_df.columns:
+        if x_label == "annotation":
+            columns = ["annotation", "cluster_ids"]
+        elif "annotation" in clustering_result.cluster_df.columns:
+            columns = [x_label, "annotation", "cluster_ids"]
+        else:
+            columns = [x_label, "cluster_ids"]
+        x_label_df = clustering_result.cluster_df[columns].drop_duplicates()
+
+        for i, column in enumerate(columns):
+            if i == 0:
+                new_labels = x_label_df[column]
+            else:
+                new_labels[new_labels == ""] = x_label_df.loc[new_labels == "", column]
+        x_label_df = pd.DataFrame(
+            {"x_label": new_labels, "cluster_ids": x_label_df["cluster_ids"]}
+        ).set_index("cluster_ids")
+
+        # Handle duplicate x_labels by appending numbers
+        x_label_df["x_label"] = x_label_df.groupby("x_label")["x_label"].transform(
+            lambda x: x if len(x) == 1 else [f"{v}({i + 1})" for i, v in enumerate(x)]
+        )
+        x_label_dict = x_label_df["x_label"].to_dict()
+
+        heatmap_df.columns = heatmap_df.columns.map(x_label_dict)
+        cluster_count.index = cluster_count.index.map(x_label_dict)
+        cluster_mean_cellsize.index = cluster_mean_cellsize.index.map(x_label_dict)
+
+    else:
+        raise ValueError(
+            f"Invalid x_label: {x_label}. Must be one of: cluster, annotation, tag"
+        )
+
+    col_ha = pch.HeatmapAnnotation(
+        cell_count=pch.anno_barplot(
+            cluster_count, legend=False, colors="grey", height=20
+        ),
+        cell_size=pch.anno_barplot(
+            cluster_mean_cellsize, legend=False, colors="grey", height=20
+        ),
+        verbose=0,
+    )
+
+    cm = pch.ClusterMapPlotter(
+        data=heatmap_df,
+        top_annotation=col_ha,
+        **preset_heatmap_kwargs,
+    )
+    return cm
+
+
+def plot_clustering_heatmap(
+    adata: ad.AnnData,
+    clustering_result: ClusteringResult,
+    features: list[str],
+    figsize: tuple[int, int] = (10, 8),
+    plot_value: str = "zscore",
+    x_label: str = "cluster",
+    preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    **kwargs: dict[str, Any],
+) -> plt.Figure:
+    """
+    Create a single heatmap figure showing feature patterns across clusters.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing the expression data.
+    clustering_result : ClusteringResult
+        Object containing clustering assignments and metadata.
+    features : list[str]
+        List of features to display.
+    figsize : tuple[int, int], optional
+        Figure dimensions (width, height) in inches, by default (10, 8).
+    plot_value : str, optional
+        Type of values to plot ("zscore" or "mean"), by default "zscore".
+    x_label : str, optional
+        Label for the x-axis, by default "cluster". Can be "cluster", "annotation",
+        or "tag". If "cluster", the cluster IDs will be used as the x-axis labels.
+        If "annotation" or "tag", the annotation or tag will be used as the x-axis
+        labels if they are not empty. Otherwise, the cluster IDs will be used as
+        the x-axis labels.
+    preset_heatmap_kwargs : str, optional
+        Name of preset kwargs for heatmap, by default "PRESET_HEATMAP_KWARGS".
+    **kwargs : dict[str, Any]
+        Additional kwargs passed to PyComplexHeatmap.ClusterMapPlotter.
+
+    Returns
+    -------
+    plt.Figure
+        The generated figure object.
+    """
+    clustering_id = clustering_result.clustering_id
+    method = clustering_result.method
+
+    cm = _plot_clustering_heatmap(
+        adata,
+        clustering_result,
+        features,
+        plot_value=plot_value,
+        x_label=x_label,
+        preset_heatmap_kwargs=preset_heatmap_kwargs,
+    )
+
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.suptitle(f"{clustering_id} ({method})")
+    cm.plot(ax=ax)
+    cm.plot_legends(ax=ax)
+
+    return fig
+
+
+def plot_clustering_heatmap_2(
+    adata: ad.AnnData,
+    clustering_result: ClusteringResult,
+    features: list[str],
+    figsize: tuple[int, int] = (20, 8),
+    x_label: str = "cluster",
+    col_gap: int = 30,
+    legend_hpad: int = 50,
+    preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    kwargs_zscore: dict[str, Any] = {},
+    kwargs_mean: dict[str, Any] = {},
+) -> plt.Figure:
+    """
+    Create a dual heatmap figure showing both z-score and mean value patterns.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing the expression data.
+    clustering_result : ClusteringResult
+        Object containing clustering assignments and metadata.
+    features : list[str]
+        List of features to display.
+    figsize : tuple[int, int], optional
+        Figure dimensions (width, height) in inches, by default (20, 8).
+    x_label : str, optional
+        Label for the x-axis, by default "cluster". Can be "cluster", "annotation",
+        or "tag". If "cluster", the cluster IDs will be used as the x-axis labels.
+        If "annotation" or "tag", the annotation or tag will be used as the x-axis
+        labels if they are not empty. Otherwise, the cluster IDs will be used as
+        the x-axis labels.
+    col_gap : int, optional
+        Gap between the two heatmaps in pixels, by default 30.
+    legend_hpad : int, optional
+        Horizontal padding for legends in pixels, by default 50.
+    preset_heatmap_kwargs : str, optional
+        Name of preset kwargs for heatmap, by default "PRESET_HEATMAP_KWARGS".
+    kwargs_zscore : dict[str, Any], optional
+        Additional kwargs for z-score heatmap, by default {}.
+    kwargs_mean : dict[str, Any], optional
+        Additional kwargs for mean value heatmap, by default {}.
+
+    Returns
+    -------
+    plt.Figure
+        The generated figure object containing both heatmaps.
+    """
+    clustering_id = clustering_result.clustering_id
+    method = clustering_result.method
+
+    cm_1 = _plot_clustering_heatmap(
+        adata,
+        clustering_result,
+        features,
+        plot_value="zscore",
+        x_label=x_label,
+        preset_heatmap_kwargs=preset_heatmap_kwargs,
+        **kwargs_zscore,
+    )
+
+    cm_2 = _plot_clustering_heatmap(
+        adata,
+        clustering_result,
+        features,
+        plot_value="mean",
+        x_label=x_label,
+        preset_heatmap_kwargs=preset_heatmap_kwargs,
+        **kwargs_mean,
+    )
+
+    cmlist = [cm_1, cm_2]
+    fig, ax = plt.subplots(figsize=figsize)
+    ax, legend_axes = pch.composite(
+        cmlist=cmlist,
+        main=0,
+        col_gap=col_gap,
+        legend_hpad=legend_hpad,
+        verbose=0,
+    )
+    ax.set_title(
+        f"{clustering_id} ({method})",
+        y=1.05,
+    )
+    plt.close(fig)
+
+    return fig
+
+
+# Plotting functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+
+class ClusteringResultManager(BaseModel):
     """
     A class to manage the clustering results and generate metadata matrices.
 
     Attributes:
     -----------
-    output_dir: Path
+    output_dir: Union[str, Path]
         The directory to store clustering results.
-    clustering_sequence: list[str]
-        The sequence of clustering IDs.
-    cluster_id_manager: pd.DataFrame
-        A DataFrame that maps unit IDs to cluster IDs across different clustering operations.
-    cluster_labels_manager: pd.DataFrame
-        A DataFrame that maps unit IDs to annotations and tags.
-    summary: pd.DataFrame
-        A combined DataFrame with all clustering information.
+    unit_ids: list[str]
+        All unit ids of the data to be clustered.
+    summary_df: pd.DataFrame
+        The summary DataFrame.
+    non_explicit_df: pd.DataFrame
+        The non-explicit DataFrame (with empty annotation) need to be subclustered.
     """
 
-    def __init__(self, output_dir: Union[str, Path]):
+    output_dir: Union[str, Path]
+    unit_ids: list[str]
+    summary_df: pd.DataFrame = Field(default_factory=pd.DataFrame)
+    non_explicit_df: pd.DataFrame = Field(default_factory=pd.DataFrame)
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    # Custom initialization using model_validator in Pydantic v2
+    @model_validator(mode="after")
+    def init(self):
         """
         Initialize the clustering result manager.
-
-        Parameters:
-        -----------
-        output_dir: Union[str, Path]
-            The directory to store clustering results.
         """
-        self.output_dir = Path(output_dir)
-        # Create output directory if it doesn't exist
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        # Create clustering results directory if it doesn't exist
-        (self.output_dir / "clustering_results").mkdir(exist_ok=True)
+        self.output_dir = Path(self.output_dir)
+        (self.output_dir / "clustering_results").mkdir(parents=True, exist_ok=True)
 
-        # Load clustering sequence if exists, otherwise initialize as empty list
-        self.clustering_sequence_file = self.output_dir / "clustering_sequence.txt"
-        if self.clustering_sequence_file.exists():
-            with open(self.clustering_sequence_file, "r") as f:
-                self.clustering_sequence = [line.strip() for line in f.readlines()]
+        clustering_sequence_file = self.output_dir / "clustering_sequence.txt"
+
+        # Load clustering sequence if exists
+        if clustering_sequence_file.exists():
+            with open(clustering_sequence_file, "r") as f:
+                clustering_sequence = [line.strip() for line in f.readlines()]
         else:
-            self.clustering_sequence = []
+            print("No clustering results found.")
+            return self
 
-        # Initialize cluster_id_manager, cluster_labels_manager, and summary
-        self.cluster_id_manager = pd.DataFrame()
-        self.cluster_labels_manager = pd.DataFrame()
-        self.summary = pd.DataFrame()
-
-        # Load existing clustering results if any
-        self._load_existing_clustering_results()
-
-    def _load_existing_clustering_results(self):
-        """
-        Load existing clustering results from the output directory.
-        """
-        if not self.clustering_sequence:
-            return
-
-        # Initialize cluster_id_manager with unit_id column
-        results_dir = self.output_dir / "clustering_results"
-
-        # Create temporary DataFrames to hold all clustering results
-        all_clustering_dfs = []
-
-        # Load each clustering result
-        for clustering_id in self.clustering_sequence:
-            clustering_file = results_dir / f"{clustering_id}.csv"
-            if not clustering_file.exists():
-                continue
-
-            # Load clustering result
-            clustering_df = pd.read_csv(clustering_file)
-            all_clustering_dfs.append(clustering_df)
-
-        if not all_clustering_dfs:
-            return
-
-        # Combine all clustering DFs to get all unique unit_ids
-        combined_df = pd.concat(all_clustering_dfs, ignore_index=True)
-        all_unit_ids = combined_df["unit_id"].unique()
-
-        # Initialize cluster_id_manager with unit_id column
-        self.cluster_id_manager = pd.DataFrame({"unit_id": all_unit_ids})
-
-        # Add clustering result columns to cluster_id_manager
-        for clustering_id in self.clustering_sequence:
-            clustering_file = results_dir / f"{clustering_id}.csv"
-            if not clustering_file.exists():
-                # If clustering result doesn't exist, add empty column
-                self.cluster_id_manager[clustering_id] = ""
-                continue
-
-            # Load clustering result
-            clustering_df = pd.read_csv(clustering_file)
-
-            # Create a mapping from unit_id to cluster_id
-            unit_to_cluster = dict(
-                zip(clustering_df["unit_id"], clustering_df["cluster_id"])
+        clustering_ids = []
+        annotations = []
+        tags = []
+        for clustering_id in clustering_sequence:
+            clustering_file = (
+                self.output_dir / "clustering_results" / f"{clustering_id}.csv"
             )
+            if not clustering_file.exists():
+                raise FileNotFoundError(f"Clustering result not found: {clustering_id}")
+            clustering_df = pd.read_csv(clustering_file)
 
-            # Add column for this clustering
-            self.cluster_id_manager[clustering_id] = self.cluster_id_manager[
-                "unit_id"
-            ].map(lambda unit: unit_to_cluster.get(unit, ""))
-
-        # Generate latest_cluster_id
-        self._generate_latest_cluster_id()
-
-        # Initialize cluster_labels_manager
-        self._update_cluster_labels_manager()
-
-        # Generate summary
-        self._generate_summary()
-
-    def _generate_latest_cluster_id(self):
-        """
-        Generate the latest cluster ID for each unit by concatenating all cluster IDs.
-        """
-
-        def concatenate_clusters(row):
-            cluster_ids = []
-            for clustering_id in self.clustering_sequence:
-                if clustering_id in row and row[clustering_id]:
-                    cluster_ids.append(str(row[clustering_id]))
-            return "_".join(cluster_ids)
-
-        self.cluster_id_manager["latest_cluster_id"] = self.cluster_id_manager.apply(
-            concatenate_clusters, axis=1
-        )
-
-    def _update_cluster_labels_manager(self):
-        """
-        Update the cluster labels manager with the latest annotations and tags.
-        """
-        # Initialize cluster_labels_manager with unit_id and latest_cluster_id
-        self.cluster_labels_manager = self.cluster_id_manager[
-            ["unit_id", "latest_cluster_id"]
-        ].copy()
-
-        # Initialize annotation and tag columns
-        self.cluster_labels_manager["annotation"] = ""
-        self.cluster_labels_manager["tag"] = ""
-
-        # Load the latest clustering result to get annotations and tags
-        if self.clustering_sequence:
-            results_dir = self.output_dir / "clustering_results"
-            latest_clustering_id = self.clustering_sequence[-1]
-            latest_clustering_file = results_dir / f"{latest_clustering_id}.csv"
-
-            if latest_clustering_file.exists():
-                latest_clustering_df = pd.read_csv(latest_clustering_file)
-
-                # Check if annotation and tag columns exist
-                if "annotation" in latest_clustering_df.columns:
-                    # Create mapping from unit_id to annotation
-                    unit_to_annotation = dict(
-                        zip(
-                            latest_clustering_df["unit_id"],
-                            latest_clustering_df["annotation"],
-                        )
-                    )
-                    self.cluster_labels_manager["annotation"] = (
-                        self.cluster_labels_manager["unit_id"].map(
-                            lambda unit: unit_to_annotation.get(unit, "")
-                        )
-                    )
-
-                if "tag" in latest_clustering_df.columns:
-                    # Create mapping from unit_id to tag
-                    unit_to_tag = dict(
-                        zip(
-                            latest_clustering_df["unit_id"], latest_clustering_df["tag"]
-                        )
-                    )
-                    self.cluster_labels_manager["tag"] = self.cluster_labels_manager[
-                        "unit_id"
-                    ].map(lambda unit: unit_to_tag.get(unit, ""))
-
-    def _generate_summary(self):
-        """
-        Generate a summary DataFrame with all clustering information.
-        """
-        # Merge cluster_id_manager and cluster_labels_manager
-        self.summary = pd.merge(
-            self.cluster_id_manager,
-            self.cluster_labels_manager[["unit_id", "annotation", "tag"]],
-            on="unit_id",
-            how="left",
-        )
-
-    def add_clustering_result(self, clustering_result: ClusteringResult):
-        """
-        Add a new clustering result.
-
-        Parameters:
-        -----------
-        clustering_result: ClusteringResult
-            The clustering result to add.
-        """
-        # Add the clustering_id to the clustering sequence
-        if clustering_result.clustering_id not in self.clustering_sequence:
-            self.clustering_sequence.append(clustering_result.clustering_id)
-
-            # Update the clustering sequence file
-            with open(self.clustering_sequence_file, "w") as f:
-                for clustering_id in self.clustering_sequence:
-                    f.write(f"{clustering_id}\n")
-
-        # Save the clustering result
-        results_dir = self.output_dir / "clustering_results"
-        results_dir.mkdir(exist_ok=True)
-
-        clustering_file = results_dir / f"{clustering_result.clustering_id}.csv"
-        clustering_result.export_clustering_result(clustering_file)
-
-        # Update the cluster_id_manager
-        # Get all unit IDs
-        all_unit_ids = (
-            set(self.cluster_id_manager["unit_id"])
-            if not self.cluster_id_manager.empty
-            else set()
-        )
-        all_unit_ids.update(clustering_result.unit_id)
-
-        # Initialize or update cluster_id_manager
-        if self.cluster_id_manager.empty:
-            self.cluster_id_manager = pd.DataFrame({"unit_id": list(all_unit_ids)})
-        else:
-            # Ensure all unit IDs are in cluster_id_manager
-            missing_unit_ids = all_unit_ids - set(self.cluster_id_manager["unit_id"])
-            if missing_unit_ids:
-                new_rows = pd.DataFrame({"unit_id": list(missing_unit_ids)})
-                self.cluster_id_manager = pd.concat(
-                    [self.cluster_id_manager, new_rows], ignore_index=True
+            # check if unit_ids is unique
+            if clustering_df["unit_ids"].duplicated().any():
+                raise ValueError(
+                    "Clustering result has multiple unit ids: {clustering_id}"
                 )
 
-        # Add column for this clustering
-        unit_to_cluster = dict(
-            zip(clustering_result.unit_id, clustering_result.cluster_id)
-        )
-        self.cluster_id_manager[clustering_result.clustering_id] = (
-            self.cluster_id_manager["unit_id"].map(
-                lambda unit: unit_to_cluster.get(unit, "")
-            )
-        )
+            # check if clustering_id is unique
+            clustering_id = clustering_df["clustering_id"].unique()
+            if len(clustering_id) > 1:
+                raise ValueError(
+                    f"Clustering result has multiple clustering ids: {clustering_id}"
+                )
+            else:
+                clustering_id = clustering_id[0]
 
-        # Generate latest_cluster_id
-        self._generate_latest_cluster_id()
-
-        # Update cluster_labels_manager
-        self._update_cluster_labels_manager()
-
-        # Generate summary
-        self._generate_summary()
-
-    def export_metadata(self):
-        """
-        Export the metadata matrices (cluster_id_manager, cluster_labels_manager, summary).
-        """
-        self.cluster_id_manager.to_csv(
-            self.output_dir / "cluster_id_manager.csv", index=False
-        )
-        self.cluster_labels_manager.to_csv(
-            self.output_dir / "cluster_labels_manager.csv", index=False
-        )
-        self.summary.to_csv(self.output_dir / "summary.csv", index=False)
-
-
-class SubClusterSystem:
-    """
-    A system to perform subclustering on data.
-
-    Attributes:
-    -----------
-    raw_data: pd.DataFrame
-        The raw data with unit_id as row index and feature as column index.
-    output_dir: Path
-        The directory to store clustering results.
-    manager: ClusteringResultManager
-        The manager to handle clustering results.
-    adata: ad.AnnData, optional
-        The AnnData object if provided during initialization.
-    """
-
-    def __init__(
-        self, data: Union[pd.DataFrame, ad.AnnData], output_dir: Union[str, Path]
-    ):
-        """
-        Initialize the subclustering system.
-
-        Parameters:
-        -----------
-        data: Union[pd.DataFrame, ad.AnnData]
-            The data with unit_id as row index and feature as column index.
-            Can be either pandas DataFrame or AnnData object.
-        output_dir: Union[str, Path]
-            The directory to store clustering results.
-        """
-        if isinstance(data, ad.AnnData):
-            self.adata = data
-            self.raw_data = data.to_df()  # Convert to DataFrame for compatibility
-        else:
-            self.raw_data = data
-            self.adata = None
-
-        self.output_dir = Path(output_dir)
-        self.manager = ClusteringResultManager(output_dir)
-
-        # Store last method and params for reference
-        self._last_method = None
-        self._last_params = None
-
-    def perform_clustering(
-        self,
-        unit_ids: list[str],
-        features: list[str],
-        method: str = "phenograph",
-        method_params: Dict[str, Any] | None = None,
-        create_adata: bool = False,
-    ) -> Union[ClusteringResult, Tuple[ClusteringResult, ad.AnnData]]:
-        """
-        Perform clustering on selected units and features.
-
-        Parameters:
-        -----------
-        unit_ids: list[str]
-            The IDs of units to cluster.
-        features: list[str]
-            The features to use for clustering.
-        method: str, default="phenograph"
-            The clustering method to use.
-        method_params: Dict[str, Any] | None, default=None
-            Parameters for the clustering method.
-        create_adata: bool, default=False
-            Whether to create and return a subset AnnData object with clustering results.
-
-        Returns:
-        --------
-        Union[ClusteringResult, Tuple[ClusteringResult, ad.AnnData]]
-            If create_adata=True, returns (ClusteringResult, AnnData), otherwise just ClusteringResult.
-        """
-        # Store method info for reference
-        self._last_method = method
-        self._last_params = method_params
-
-        # Subset the raw data
-        subset_data = self.raw_data.loc[unit_ids, features]
-
-        # Generate a unique clustering ID
-        clustering_id = str(uuid.uuid4())
-
-        # Perform clustering based on the method
-        if method == "phenograph":
-            cluster_ids = self._run_phenograph_clustering(subset_data, method_params)
-        elif method == "kmeans":
-            cluster_ids = self._run_kmeans_clustering(subset_data, method_params)
-        elif method == "leiden":
-            cluster_ids = self._run_leiden_clustering(subset_data, method_params)
-        else:
-            raise ValueError(f"Unsupported clustering method: {method}")
-
-        # Create clustering result
-        clustering_result = ClusteringResult(
-            unit_id=unit_ids, cluster_id=cluster_ids, clustering_id=clustering_id
-        )
-
-        # Create AnnData if requested
-        if create_adata and self.adata is not None:
-            adata_subset = self.create_subclustering_adata(unit_ids, features)
-            adata_subset = self.add_clustering_to_adata(adata_subset, clustering_result)
-            return clustering_result, adata_subset
-
-        return clustering_result
-
-    def create_subclustering_adata(
-        self, unit_ids: list[str], features: Optional[Sequence[str]] = None
-    ) -> ad.AnnData:
-        """
-        Create a subset AnnData object for subclustering.
-
-        Parameters:
-        -----------
-        unit_ids: list[str]
-            The IDs of units to include in the subset.
-        features: Optional[Sequence[str]], optional
-            Features to include. If None, all features are included.
-
-        Returns:
-        --------
-        ad.AnnData
-            A subset AnnData object containing only the specified units and features.
-        """
-        if self.adata is None:
-            raise ValueError(
-                "No AnnData object available. Please initialize with an AnnData object."
+            # annotations
+            annotations.append(
+                clustering_df[["unit_ids", "annotation", "clustering_id"]]
             )
 
-        # Filter by unit_ids
-        valid_ids = [id for id in unit_ids if id in self.adata.obs_names]
-        if not valid_ids:
-            raise ValueError(
-                "None of the specified unit_ids exist in the AnnData object."
+            # tags
+            tags.append(
+                clustering_df.drop(columns=["annotation", "cluster_ids", "method"])
             )
 
-        # AnnData supports list indexing
-        adata_subset = self.adata[valid_ids].copy()
+            # clustering_id
+            clustering_df = clustering_df.drop(
+                columns=["clustering_id", "method"]
+            ).rename(columns={"cluster_ids": clustering_id})
+            clustering_df[clustering_id] = clustering_df[clustering_id].astype(str)
+            clustering_ids.append(clustering_df[["unit_ids", clustering_id]])
 
-        # Filter by features if specified
-        if features is not None:
-            valid_features = [f for f in features if f in adata_subset.var_names]
-            if not valid_features:
-                raise ValueError("None of the specified features exist in the data.")
-            # AnnData supports list indexing for features
-            adata_subset = adata_subset[:, valid_features]
-
-        return adata_subset
-
-    def add_clustering_to_adata(
-        self,
-        adata: ad.AnnData,
-        clustering_result: ClusteringResult,
-        cluster_name: Optional[str] = None,
-    ) -> ad.AnnData:
-        """
-        Add clustering results to an AnnData object.
-
-        Parameters:
-        -----------
-        adata: ad.AnnData
-            The AnnData object to add clustering results to.
-        clustering_result: ClusteringResult
-            The clustering result to add.
-        cluster_name: Optional[str], optional
-            Name for the clustering column. If None, uses a shortened clustering ID.
-
-        Returns:
-        --------
-        ad.AnnData
-            The updated AnnData object.
-        """
-        # Create a mapping from unit_id to cluster_id
-        unit_to_cluster = dict(
-            zip(clustering_result.unit_id, clustering_result.cluster_id)
-        )
-
-        # Determine cluster column name
-        if cluster_name is None:
-            cluster_name = f"cluster_{clustering_result.clustering_id[:8]}"
-
-        # Add cluster IDs to obs
-        adata.obs[cluster_name] = [
-            unit_to_cluster.get(unit, "NA") for unit in adata.obs_names
+        # latest cluster id
+        clustering_ids = [
+            clustering_id.set_index("unit_ids") for clustering_id in clustering_ids
         ]
-        adata.obs[cluster_name] = adata.obs[cluster_name].astype("category")
+        clustering_id_df = pd.concat(clustering_ids, axis=1).fillna("")
+        clustering_id_df["latest_cluster_id"] = clustering_id_df.apply(
+            lambda x: "|".join([i for i in x if i != ""]), axis=1
+        )
 
-        # Add annotations if available
-        if "annotation" in clustering_result.cluster_df.columns:
-            # Create mapping from cluster_id to annotation
-            cluster_to_anno = {}
-            for cid in clustering_result.cluster_df["cluster_id"].unique():
-                mask = clustering_result.cluster_df["cluster_id"] == cid
-                if any(mask):
-                    anno_series = clustering_result.cluster_df.loc[mask, "annotation"]
-                    if not anno_series.empty:
-                        anno = anno_series.iloc[0]
-                        cluster_to_anno[cid] = anno
-
-            # Add annotations
-            anno_col = f"{cluster_name}_annotation"
-            adata.obs[anno_col] = [
-                cluster_to_anno.get(adata.obs[cluster_name][i], "")
-                if adata.obs[cluster_name][i] != "NA"
-                else ""
-                for i in range(len(adata.obs))
-            ]
-
-        # Add tags if available
-        if "tag" in clustering_result.cluster_df.columns:
-            # Create mapping from cluster_id to tag
-            cluster_to_tag = {}
-            for cid in clustering_result.cluster_df["cluster_id"].unique():
-                mask = clustering_result.cluster_df["cluster_id"] == cid
-                if any(mask):
-                    tag_series = clustering_result.cluster_df.loc[mask, "tag"]
-                    if not tag_series.empty:
-                        tag = tag_series.iloc[0]
-                        cluster_to_tag[cid] = tag
-
-            # Add tags
-            tag_col = f"{cluster_name}_tag"
-            adata.obs[tag_col] = [
-                cluster_to_tag.get(adata.obs[cluster_name][i], "")
-                if adata.obs[cluster_name][i] != "NA"
-                else ""
-                for i in range(len(adata.obs))
-            ]
-
-        # Store clustering parameters in uns
-        adata.uns[f"{cluster_name}_params"] = {
-            "clustering_id": clustering_result.clustering_id,
-            "method": self._last_method,
-            "method_params": self._last_params,
-            "n_clusters": len(set(clustering_result.cluster_id)),
-        }
-
-        return adata
-
-    def _run_phenograph_clustering(
-        self, data: pd.DataFrame, method_params: Dict[str, Any] | None = None
-    ):
-        """
-        Run phenograph clustering on the data.
-
-        Parameters:
-        -----------
-        data: pd.DataFrame
-            Data to cluster.
-        method_params: Dict[str, Any] | None
-            Parameters for phenograph clustering.
-
-        Returns:
-        --------
-        list[str]
-            Cluster assignments.
-        """
-        try:
-            import scanpy as sc
-            import scanpy.external as sce
-        except ImportError:
-            raise ImportError(
-                "scanpy is required for phenograph clustering. Install it with 'pip install scanpy'."
+        # annotation
+        annotation_df = pd.concat(annotations, axis=0)
+        annotation_df = annotation_df[
+            (~annotation_df["annotation"].isna()) & (annotation_df["annotation"] != "")
+        ].drop_duplicates()
+        annotation_df_multi = (
+            annotation_df.groupby(["unit_ids", "annotation"])
+            .size()
+            .reset_index(name="count")
+            .query("count > 1")
+        )
+        if len(annotation_df_multi) > 0:
+            raise ValueError(
+                "Clustering result has multiple annotations for the same unit."
             )
+        annotation_df = annotation_df.set_index("unit_ids")
 
-        # Default parameters for phenograph
-        if method_params is None:
-            method_params = {"k": 30}
+        # tags
+        tags_df = pd.concat(tags, axis=0)
+        tags_df = tags_df[(~tags_df["tag"].isna()) & (tags_df["tag"] != "")]
+        tags_columns = tags_df.drop(columns=["unit_ids", "clustering_id"]).columns
 
-        # Create AnnData object
-        adata = sc.AnnData(X=data)
-
-        # Run phenograph
-        sc.pp.pca(adata)
-        sce.tl.phenograph(adata, **method_params)
-
-        # Get cluster assignments
-        col_cluster = [col for col in adata.obs.columns if "pheno" in col][0]
-        cluster_ids = [str(cid) for cid in adata.obs[col_cluster]]
-
-        return cluster_ids
-
-    def _run_kmeans_clustering(
-        self, data: pd.DataFrame, method_params: Dict[str, Any] | None = None
-    ):
-        """
-        Run kmeans clustering on the data.
-
-        Parameters:
-        -----------
-        data: pd.DataFrame
-            Data to cluster.
-        method_params: Dict[str, Any] | None
-            Parameters for kmeans clustering.
-
-        Returns:
-        --------
-        list[str]
-            Cluster assignments.
-        """
-        from sklearn.cluster import KMeans
-
-        # Default parameters for kmeans
-        if method_params is None:
-            method_params = {"n_clusters": 8, "random_state": 0}
-
-        # Run kmeans
-        kmeans = KMeans(**method_params)
-        kmeans.fit(data)
-
-        # Get cluster assignments
-        cluster_ids = [str(cid) for cid in kmeans.labels_]
-
-        return cluster_ids
-
-    def _run_leiden_clustering(
-        self, data: pd.DataFrame, method_params: Dict[str, Any] | None = None
-    ):
-        """
-        Run leiden clustering on the data.
-
-        Parameters:
-        -----------
-        data: pd.DataFrame
-            Data to cluster.
-        method_params: Dict[str, Any] | None
-            Parameters for leiden clustering.
-
-        Returns:
-        --------
-        list[str]
-            Cluster assignments.
-        """
-        try:
-            import scanpy as sc
-        except ImportError:
-            raise ImportError(
-                "scanpy is required for leiden clustering. Install it with 'pip install scanpy'."
+        tag_dfs = []
+        for tag_column in tags_columns:
+            tag_df = (
+                tags_df.groupby(["unit_ids"])[tag_column]
+                .apply(lambda x: "|".join([i for i in x if i != ""]))
+                .to_frame(name=tag_column)
             )
+            tag_dfs.append(tag_df)
+        tags_df = pd.concat(tag_dfs, axis=1)
 
-        # Default parameters for leiden
-        if method_params is None:
-            method_params = {"resolution": 1.0}
+        summary_df = pd.concat([clustering_id_df, annotation_df, tags_df], axis=1)
+        self.summary_df = (
+            pd.DataFrame(index=self.unit_ids)
+            .merge(summary_df, left_index=True, right_index=True, how="left")
+            .fillna("")
+        )
+        self.non_explicit_df = self.summary_df.query("annotation == ''")
+        return self
 
-        # Create AnnData object
-        adata = sc.AnnData(X=data)
 
-        # Compute neighborhood graph
-        sc.pp.neighbors(adata)
+if __name__ == "__main__":
+    # %%
+    markers_all = [
+        "CD45",
+        "CD3e",
+        "CD8",
+        "CD4",
+        "FoxP3",
+        "CD20",
+        "CD68",
+        "CD163",
+        "CD16",
+        "CD11b",
+        "MPO",
+        "Cytokeratin",
+        "CD31",
+        "Podoplanin",
+        "aSMA",
+    ]
+    adata = ad.read_h5ad("input/data_demo.h5ad")
+    unit_ids = adata.obs.index[0:1000].tolist()
+    features = markers_all
 
-        # Run leiden
-        sc.tl.leiden(adata, **method_params)
+    manager = ClusteringResultManager(
+        output_dir="output/clustering_demo", unit_ids=adata.obs.index
+    )
+    manager.summary_df
+    manager.non_explicit_df
 
-        # Get cluster assignments
-        cluster_ids = [str(cid) for cid in adata.obs["leiden"]]
+    # %%
+    # clustering with phenograph
+    clustering_result = _run_clustering_phenograph(
+        adata, unit_ids, features, method_params={"k": 50}
+    )
 
-        return cluster_ids
+    # plot heatmap without value limit
+    plot_clustering_heatmap_2(
+        adata,
+        clustering_result,
+        features,
+        figsize=(20, 8),
+        col_gap=30,
+        legend_hpad=60,
+    )
 
-    def add_annotations_to_clustering(
-        self, clustering_result: ClusteringResult, annotations: Dict[str, str]
-    ):
-        """
-        Add annotations to clusters.
+    # plot heatmap with value limit
+    plot_clustering_heatmap_2(
+        adata,
+        clustering_result,
+        features,
+        kwargs_zscore={"vmin": -3, "center": 0, "vmax": 3},
+        kwargs_mean={"vmin": 0, "vmax": 0.5},
+    )
+    # %%
+    # add annotation and tag
+    clustering_result.add_annotation(
+        {"1": "Endothelial", "2": "Muscle-like"},
+    )
+    clustering_result.add_tag(
+        {"3": "T_B", "4": "T_M", "5": "T_B"},
+        tag_name="tag",
+    )
 
-        Parameters:
-        -----------
-        clustering_result: ClusteringResult
-            The clustering result to annotate.
-        annotations: Dict[str, str]
-            Annotations for clusters (cluster_id -> annotation).
-        """
-        clustering_result.add_annotation(annotations)
-        return clustering_result
+    # %%
+    plot_clustering_heatmap_2(
+        adata,
+        clustering_result,
+        features,
+        x_label="annotation",
+        kwargs_zscore={"vmin": -3, "center": 0, "vmax": 3},
+        kwargs_mean={"vmin": 0, "vmax": 0.5},
+    )
 
-    def add_tags_to_clustering(
-        self, clustering_result: ClusteringResult, tags: Dict[str, str]
-    ):
-        """
-        Add tags to clusters.
+    plot_clustering_heatmap_2(
+        adata,
+        clustering_result,
+        features,
+        x_label="tag",
+        kwargs_zscore={"vmin": -3, "center": 0, "vmax": 3},
+        kwargs_mean={"vmin": 0, "vmax": 0.5},
+    )
+    # %%
+    # clustering with kmeans
+    clustering_result = _run_clustering_kmeans(
+        adata, unit_ids, features, method_params={"n_clusters": 25, "random_state": 0}
+    )
 
-        Parameters:
-        -----------
-        clustering_result: ClusteringResult
-            The clustering result to tag.
-        tags: Dict[str, str]
-            Tags for clusters (cluster_id -> tag).
-        """
-        clustering_result.add_tag(tags)
-        return clustering_result
+    # plot heatmap without value limit
+    fig, heatmap = plot_clustering_heatmap(
+        adata, clustering_result, features, plot_value="zscore"
+    )
+    fig, heatmap = plot_clustering_heatmap(
+        adata, clustering_result, features, plot_value="mean"
+    )
 
-    def save_clustering_result(self, clustering_result: ClusteringResult):
-        """
-        Save the clustering result and export metadata.
+    # plot heatmap with value limit
+    fig, heatmap = plot_clustering_heatmap(
+        adata, clustering_result, features, plot_value="zscore", vmin=-3, vmax=3
+    )
+    fig, heatmap = plot_clustering_heatmap(
+        adata, clustering_result, features, plot_value="mean", vmin=0, vmax=0.5
+    )
 
-        Parameters:
-        -----------
-        clustering_result: ClusteringResult
-            The clustering result to save.
-        """
-        # Add the clustering result to the manager
-        self.manager.add_clustering_result(clustering_result)
+    # %%
+    # clustering with leiden
+    clustering_result = _run_clustering_leiden(
+        adata, unit_ids, features, method_params={"resolution": 1.0}
+    )
+    fig, heatmap = plot_clustering_heatmap(adata, clustering_result, features)
 
-        # Export metadata
-        self.manager.export_metadata()
-
-    def get_summary(self) -> pd.DataFrame:
-        """
-        Get the summary of all clustering results.
-
-        Returns:
-        --------
-        pd.DataFrame
-            The summary DataFrame.
-        """
-        return self.manager.summary
-
-    def select_units_by_tag(self, tag: str) -> list[str]:
-        """
-        Select units by tag.
-
-        Parameters:
-        -----------
-        tag: str
-            The tag to select.
-
-        Returns:
-        --------
-        list[str]
-            The selected unit IDs.
-        """
-        if self.manager.cluster_labels_manager.empty:
-            return []
-
-        selected_units = self.manager.cluster_labels_manager[
-            self.manager.cluster_labels_manager["tag"] == tag
-        ]["unit_id"].tolist()
-
-        return selected_units
-
-    def select_units_by_annotation(self, annotation: str) -> list[str]:
-        """
-        Select units by annotation.
-
-        Parameters:
-        -----------
-        annotation: str
-            The annotation to select.
-
-        Returns:
-        --------
-        list[str]
-            The selected unit IDs.
-        """
-        if self.manager.cluster_labels_manager.empty:
-            return []
-
-        selected_units = self.manager.cluster_labels_manager[
-            self.manager.cluster_labels_manager["annotation"] == annotation
-        ]["unit_id"].tolist()
-
-        return selected_units
-
-    def select_units_by_latest_cluster_id(self, latest_cluster_id: str) -> list[str]:
-        """
-        Select units by latest cluster ID.
-
-        Parameters:
-        -----------
-        latest_cluster_id: str
-            The latest cluster ID to select.
-
-        Returns:
-        --------
-        list[str]
-            The selected unit IDs.
-        """
-        if self.manager.cluster_id_manager.empty:
-            return []
-
-        selected_units = self.manager.cluster_id_manager[
-            self.manager.cluster_id_manager["latest_cluster_id"] == latest_cluster_id
-        ]["unit_id"].tolist()
-
-        return selected_units
+    fig
