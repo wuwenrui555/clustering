@@ -122,8 +122,8 @@ class ClusteringResult(BaseModel):
         Load a clustering result from a csv file.
         """
         cluster_df = pd.read_csv(csv_f)
-        unit_ids = cluster_df["unit_ids"].tolist()
-        cluster_ids = cluster_df["cluster_ids"].tolist()
+        unit_ids = cluster_df["unit_ids"].astype(str).tolist()
+        cluster_ids = cluster_df["cluster_ids"].astype(str).tolist()
         clustering_id_values = cluster_df["clustering_id"].unique()
         method_values = cluster_df["method"].unique()
 
