@@ -1,5 +1,6 @@
 # %%
 import uuid
+import pickle
 from pathlib import Path
 from typing import Any, Dict, Union
 
@@ -143,6 +144,35 @@ class ClusteringResult(BaseModel):
             clustering_id=clustering_id,
         )
 
+    @classmethod
+    def pop(cls, clustering_id: str, output_dir: Union[str, Path]):
+        """
+        Pop the clustering result from the stash.
+
+        Parameters:
+        -----------
+        clustering_id: str
+            The id of the clustering result to pop.
+        output_dir: Union[str, Path]
+            The directory to reload the clustering result. The stashed clustering
+            result was saved under the `clustering_stash` subdirectory.
+
+        Returns:
+        --------
+        ClusteringResult
+            The loaded clustering result instance.
+        """
+        output_dir = Path(output_dir)
+        input_file = output_dir / "clustering_stash" / f"{clustering_id}.pickle"
+
+        if not input_file.exists():
+            raise FileNotFoundError(
+                f"No clustering result found for id: {clustering_id}"
+            )
+
+        with open(input_file, "rb") as f:
+            return pickle.load(f)
+
     def add_annotation(self, annotation: dict[str, str]):
         """
         Add annotation to explicit clusters.
@@ -190,6 +220,30 @@ class ClusteringResult(BaseModel):
 
         # Add the tag column
         self.cluster_df[tag_name] = self.cluster_df["cluster_ids"].map(cluster_to_tag)
+
+    def stash(self, output_dir: Union[str, Path]):
+        """
+        Temporarily save the clustering result to a csv file.
+
+        Parameters:
+        -----------
+        output_dir: Union[str, Path]
+            The directory to store the clustering result. The clustering result
+            will be saved as `{self.clustering_id}.pickle` under the `clustering_stash`
+            subdirectory.
+        """
+        output_dir = Path(output_dir)
+        output_file = output_dir / "clustering_stash" / f"{self.clustering_id}.pickle"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, "wb") as f:
+            pickle.dump(self, f)
+        print(
+            f"To reload the stashed clustering result:"
+            f"\nClusteringResult.pop("
+            f"\n    clustering_id='{self.clustering_id}',"
+            f"\n    output_dir='{output_dir}'"
+            f"\n)"
+        )
 
     def save(self, output_dir: Union[str, Path]):
         """
