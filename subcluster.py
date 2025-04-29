@@ -482,6 +482,11 @@ def _plot_clustering_heatmap(
 
     unit_ids = clustering_result.unit_ids
     cluster_ids = clustering_result.cluster_ids
+    try:
+        cluster_ids_order = sorted([int(i) for i in set(cluster_ids)])
+    except ValueError:
+        cluster_ids_order = sorted(set(cluster_ids))
+    cluster_ids_order = [str(i) for i in cluster_ids_order]
 
     adata_clustering = adata[unit_ids, features]
     metadata = adata_clustering.obs
@@ -500,44 +505,39 @@ def _plot_clustering_heatmap(
         preset_heatmap_kwargs["label"] = "mean"
     else:
         raise ValueError(f"Invalid plot_value: {plot_value}")
+    heatmap_df = heatmap_df[cluster_ids_order]
 
     cluster_count = pd.Series(cluster_ids).value_counts().to_frame(name="count")
     cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
 
     if x_label == "cluster":
-        pass
-    elif x_label in clustering_result.cluster_df.columns:
-        if x_label == "annotation":
-            columns = ["annotation", "cluster_ids"]
-        elif "annotation" in clustering_result.cluster_df.columns:
-            columns = [x_label, "annotation", "cluster_ids"]
-        else:
-            columns = [x_label, "cluster_ids"]
-        x_label_df = clustering_result.cluster_df[columns].drop_duplicates()
-
-        for i, column in enumerate(columns):
-            if i == 0:
-                new_labels = x_label_df[column]
-            else:
-                new_labels[new_labels == ""] = x_label_df.loc[new_labels == "", column]
-        x_label_df = pd.DataFrame(
-            {"x_label": new_labels, "cluster_ids": x_label_df["cluster_ids"]}
-        ).set_index("cluster_ids")
-
-        # Handle duplicate x_labels by appending numbers
-        x_label_df["x_label"] = x_label_df.groupby("x_label")["x_label"].transform(
-            lambda x: x if len(x) == 1 else [f"{v}({i + 1})" for i, v in enumerate(x)]
-        )
-        x_label_dict = x_label_df["x_label"].to_dict()
-
-        heatmap_df.columns = heatmap_df.columns.map(x_label_dict)
-        cluster_count.index = cluster_count.index.map(x_label_dict)
-        cluster_mean_cellsize.index = cluster_mean_cellsize.index.map(x_label_dict)
-
+        columns = ["cluster_ids"]
+    elif x_label == "annotation":
+        columns = ["annotation", "cluster_ids"]
     else:
-        raise ValueError(
-            f"Invalid x_label: {x_label}. Must be one of: cluster, annotation, tag"
-        )
+        columns = [x_label, "annotation", "cluster_ids"]
+    columns = [col for col in columns if col in clustering_result.cluster_df.columns]
+    x_label_df = clustering_result.cluster_df[columns].drop_duplicates()
+
+    for i, column in enumerate(columns):
+        if i == 0:
+            new_labels = x_label_df[column]
+        else:
+            new_labels[new_labels == ""] = x_label_df.loc[new_labels == "", column]
+    x_label_df = pd.DataFrame(
+        {"x_label": new_labels, "cluster_ids": x_label_df["cluster_ids"]}
+    ).set_index("cluster_ids")
+
+    # Handle duplicate x_labels by appending numbers
+    x_label_df["x_label"] = x_label_df.groupby("x_label")["x_label"].transform(
+        lambda x: x if len(x) == 1 else [f"{v}({i + 1})" for i, v in enumerate(x)]
+    )
+    x_label_dict = x_label_df["x_label"].to_dict()
+
+    heatmap_df.columns = heatmap_df.columns.map(x_label_dict)
+    heatmap_df = heatmap_df[sorted(heatmap_df.columns)]
+    cluster_count.index = cluster_count.index.map(x_label_dict)
+    cluster_mean_cellsize.index = cluster_mean_cellsize.index.map(x_label_dict)
 
     col_ha = pch.HeatmapAnnotation(
         cell_count=pch.anno_barplot(
