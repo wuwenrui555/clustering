@@ -754,13 +754,13 @@ class ClusteringResultManager(BaseModel):
             clustering_ids.append(clustering_df[["unit_ids", clustering_id]])
 
         # latest cluster id
-        clustering_ids = [
-            clustering_id.set_index("unit_ids") for clustering_id in clustering_ids
-        ]
-        clustering_id_df = pd.concat(clustering_ids, axis=1).fillna("")
-        clustering_id_df["latest_cluster_id"] = clustering_id_df.apply(
-            lambda x: "|".join([i for i in x if i != ""]), axis=1
-        )
+        # clustering_ids = [
+        #     clustering_id.set_index("unit_ids") for clustering_id in clustering_ids
+        # ]
+        # clustering_id_df = pd.concat(clustering_ids, axis=1).fillna("")
+        # clustering_id_df["latest_cluster_id"] = clustering_id_df.apply(
+        #     lambda x: "|".join([i for i in x if i != ""]), axis=1
+        # )
 
         # annotation
         annotation_df = pd.concat(annotations, axis=0)
@@ -768,7 +768,8 @@ class ClusteringResultManager(BaseModel):
             (~annotation_df["annotation"].isna()) & (annotation_df["annotation"] != "")
         ].drop_duplicates()
         annotation_df_multi = (
-            annotation_df.groupby(["unit_ids", "annotation"])
+            annotation_df.drop_duplicates(["unit_ids", "annotation"])
+            .groupby(["unit_ids", "annotation"])
             .size()
             .reset_index(name="count")
             .query("count > 1")
@@ -776,6 +777,22 @@ class ClusteringResultManager(BaseModel):
         if len(annotation_df_multi) > 0:
             raise ValueError(
                 "Clustering result has multiple annotations for the same unit."
+            )
+
+        annotation_df_multi_clustering_id = (
+            annotation_df.groupby(["unit_ids", "annotation"])
+            .size()
+            .reset_index(name="count")
+            .query("count > 1")
+        )
+        duplicated_clustering_ids = annotation_df[
+            annotation_df["unit_ids"].isin(
+                annotation_df_multi_clustering_id["unit_ids"]
+            )
+        ]["clustering_id"].unique()
+        if len(annotation_df_multi_clustering_id) > 0:
+            raise ValueError(
+                f"Duplicated clustering result with same annotations: {duplicated_clustering_ids}."
             )
         annotation_df = annotation_df.set_index("unit_ids")
 
@@ -797,7 +814,8 @@ class ClusteringResultManager(BaseModel):
             tag_dfs.append(tag_df)
         tags_df = pd.concat(tag_dfs, axis=1)
 
-        summary_df = pd.concat([clustering_id_df, annotation_df, tags_df], axis=1)
+        # summary_df = pd.concat([clustering_id_df, annotation_df, tags_df], axis=1)
+        summary_df = pd.concat([annotation_df, tags_df], axis=1)
         self.summary_df = (
             pd.DataFrame(index=self.unit_ids)
             .merge(summary_df, left_index=True, right_index=True, how="left")
