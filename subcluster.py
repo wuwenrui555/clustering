@@ -10,6 +10,9 @@ import PyComplexHeatmap as pch
 import scanpy as sc
 from pydantic import BaseModel, Field, model_validator
 from sklearn.cluster import KMeans
+from tqdm import tqdm
+
+TQDM_FORMAT = "{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
 
 # 1. clustering_sequence: record the sequence of clustering
 # uuid_1, uuid_2, uuid_3, ...
@@ -704,7 +707,11 @@ class ClusteringResultManager(BaseModel):
         clustering_ids = []
         annotations = []
         tags = []
-        for clustering_id in clustering_sequence:
+        for clustering_id in tqdm(
+            clustering_sequence,
+            desc="Loading clustering results",
+            bar_format=TQDM_FORMAT,
+        ):
             clustering_file = (
                 self.output_dir / "clustering_results" / f"{clustering_id}.csv"
             )
@@ -777,7 +784,9 @@ class ClusteringResultManager(BaseModel):
         tags_columns = tags_df.drop(columns=["unit_ids", "clustering_id"]).columns
 
         tag_dfs = []
-        for tag_column in tags_columns:
+        for tag_column in tqdm(
+            tags_columns, desc="Processing tags", bar_format=TQDM_FORMAT
+        ):
             tag_df = tags_df[["unit_ids", tag_column]]
             tag_df = tag_df[(~tag_df[tag_column].isna()) & (tag_df[tag_column] != "")]
             tag_df = (
