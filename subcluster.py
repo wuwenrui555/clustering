@@ -759,9 +759,14 @@ class ClusteringResultManager(BaseModel):
         # Load clustering sequence if exists
         if clustering_sequence_file.exists():
             with open(clustering_sequence_file, "r") as f:
-                clustering_sequence = [line.strip() for line in f.readlines()]
+                clustering_sequence = [
+                    line.strip() for line in f.readlines() if line.strip() != ""
+                ]
+            if len(clustering_sequence) == 0:
+                print("No clustering sequence found.")
+                return self
         else:
-            print("No clustering results found.")
+            print("No clustering sequence found.")
             return self
 
         clustering_ids = []
