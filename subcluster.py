@@ -485,6 +485,11 @@ def _plot_clustering_heatmap(
 
     unit_ids = clustering_result.unit_ids
     cluster_ids = clustering_result.cluster_ids
+    try:
+        cluster_ids_order = sorted([int(i) for i in set(cluster_ids)])
+    except ValueError:
+        cluster_ids_order = sorted(set(cluster_ids))
+    cluster_ids_order = [str(i) for i in cluster_ids_order]
 
     adata_clustering = adata[unit_ids, features]
     metadata = adata_clustering.obs
@@ -503,6 +508,7 @@ def _plot_clustering_heatmap(
         preset_heatmap_kwargs["label"] = "mean"
     else:
         raise ValueError(f"Invalid plot_value: {plot_value}")
+    heatmap_df = heatmap_df[cluster_ids_order]
 
     cluster_count = pd.Series(cluster_ids).value_counts().to_frame(name="count")
     cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
