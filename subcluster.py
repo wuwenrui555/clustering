@@ -800,8 +800,6 @@ class ClusteringResultManager(BaseModel):
                 clustering_id = clustering_id[0]
 
             # annotations
-            if "annotation" not in clustering_df.columns:
-                clustering_df["annotation"] = ""
             annotations.append(
                 clustering_df[["unit_ids", "annotation", "clustering_id"]]
             )
