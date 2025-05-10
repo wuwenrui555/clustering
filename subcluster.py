@@ -421,12 +421,12 @@ def _run_clustering_leiden(
 
 PRESET_HEATMAP_KWARGS = {
     "row_cluster": False,
-    "col_cluster": True,
+    "col_cluster": False,
     "show_rownames": True,
     "show_colnames": True,
     "row_names_side": "right",
     "col_names_side": "bottom",
-    "col_dendrogram": True,
+    "col_dendrogram": False,
     "col_dendrogram_size": 15,
     "tree_kws": {"colors": "blue"},
     "cmap": "RdBu_r",
@@ -497,11 +497,6 @@ def _plot_clustering_heatmap(
 
     unit_ids = clustering_result.unit_ids
     cluster_ids = clustering_result.cluster_ids
-    try:
-        cluster_ids_order = sorted([int(i) for i in set(cluster_ids)])
-    except ValueError:
-        cluster_ids_order = sorted(set(cluster_ids))
-    cluster_ids_order = [str(i) for i in cluster_ids_order]
 
     adata_clustering = adata[unit_ids, features]
     metadata = adata_clustering.obs
@@ -520,7 +515,6 @@ def _plot_clustering_heatmap(
         preset_heatmap_kwargs["label"] = "mean"
     else:
         raise ValueError(f"Invalid plot_value: {plot_value}")
-    heatmap_df = heatmap_df[cluster_ids_order]
 
     cluster_count = pd.Series(cluster_ids).value_counts().to_frame(name="count")
     cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
@@ -550,7 +544,13 @@ def _plot_clustering_heatmap(
     x_label_dict = x_label_df["x_label"].to_dict()
 
     heatmap_df.columns = heatmap_df.columns.map(x_label_dict)
-    heatmap_df = heatmap_df[sorted(heatmap_df.columns)]
+    try:
+        columns_order = sorted([int(i) for i in set(heatmap_df.columns)])
+    except ValueError:
+        columns_order = sorted(set(heatmap_df.columns))
+    columns_order = [str(i) for i in columns_order]
+    heatmap_df = heatmap_df[columns_order]
+
     cluster_count.index = cluster_count.index.map(x_label_dict)
     cluster_mean_cellsize.index = cluster_mean_cellsize.index.map(x_label_dict)
 
