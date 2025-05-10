@@ -285,19 +285,31 @@ def run_clustering(
     features: list[str],
     method: str = "phenograph",
     method_params: Dict[str, Any] | None = None,
+    output_dir: Union[str, Path] = None,
 ) -> ClusteringResult:
     """
     Run clustering on the given data.
     """
     match method:
         case "phenograph":
-            return _run_clustering_phenograph(adata, unit_ids, features, method_params)
+            clustering_result = _run_clustering_phenograph(
+                adata, unit_ids, features, method_params
+            )
         case "kmeans":
-            return _run_clustering_kmeans(adata, unit_ids, features, method_params)
+            clustering_result = _run_clustering_kmeans(
+                adata, unit_ids, features, method_params
+            )
         case "leiden":
-            return _run_clustering_leiden(adata, unit_ids, features, method_params)
+            clustering_result = _run_clustering_leiden(
+                adata, unit_ids, features, method_params
+            )
         case _:
             raise ValueError(f"Method {method} not supported.")
+
+    if output_dir is not None:
+        clustering_result.stash(output_dir)
+
+    return clustering_result
 
 
 def _run_clustering_phenograph(
