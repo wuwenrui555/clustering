@@ -1,6 +1,6 @@
 # %%
-import uuid
 import pickle
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Union
 
@@ -760,130 +760,11 @@ class ClusteringResultManager(BaseModel):
         self.output_dir = Path(self.output_dir)
         (self.output_dir / "clustering_results").mkdir(parents=True, exist_ok=True)
 
-        clustering_sequence_file = self.output_dir / "clustering_sequence.txt"
-
-        # Load clustering sequence if exists
-        if clustering_sequence_file.exists():
-            with open(clustering_sequence_file, "r") as f:
-                clustering_sequence = [
-                    line.strip() for line in f.readlines() if line.strip() != ""
-                ]
-            if len(clustering_sequence) == 0:
-                print("No clustering sequence found.")
-                return self
-        else:
-            print("No clustering sequence found.")
-            return self
-
-        clustering_ids = []
-        annotations = []
-        tags = []
-        for clustering_id in tqdm(
-            clustering_sequence,
-            desc="Loading clustering results",
-            bar_format=TQDM_FORMAT,
-        ):
-            clustering_file = (
-                self.output_dir / "clustering_results" / f"{clustering_id}.csv"
-            )
-            if not clustering_file.exists():
-                raise FileNotFoundError(f"Clustering result not found: {clustering_id}")
-            clustering_df = pd.read_csv(clustering_file)
-
-            # check if unit_ids is unique
-            if clustering_df["unit_ids"].duplicated().any():
-                raise ValueError(
-                    "Clustering result has multiple unit ids: {clustering_id}"
-                )
-
-            # check if clustering_id is unique
-            clustering_id = clustering_df["clustering_id"].unique()
-            if len(clustering_id) > 1:
-                raise ValueError(
-                    f"Clustering result has multiple clustering ids: {clustering_id}"
-                )
-            else:
-                clustering_id = clustering_id[0]
-
-            # annotations
-            annotations.append(
-                clustering_df[["unit_ids", "annotation", "clustering_id"]]
-            )
-
-            # tags
-            tags.append(
-                clustering_df.drop(columns=["annotation", "cluster_ids", "method"])
-            )
-
-            # clustering_id
-            clustering_df = clustering_df.drop(
-                columns=["clustering_id", "method"]
-            ).rename(columns={"cluster_ids": clustering_id})
-            clustering_df[clustering_id] = clustering_df[clustering_id].astype(str)
-            clustering_ids.append(clustering_df[["unit_ids", clustering_id]])
-
-        # latest cluster id
-        # clustering_ids = [
-        #     clustering_id.set_index("unit_ids") for clustering_id in clustering_ids
-        # ]
-        # clustering_id_df = pd.concat(clustering_ids, axis=1).fillna("")
-        # clustering_id_df["latest_cluster_id"] = clustering_id_df.apply(
-        #     lambda x: "|".join([i for i in x if i != ""]), axis=1
-        # )
-
-        # annotation
-        annotation_df = pd.concat(annotations, axis=0)
-        annotation_df = annotation_df[
-            (~annotation_df["annotation"].isna()) & (annotation_df["annotation"] != "")
-        ].drop_duplicates()
-        annotation_df_multi = (
-            annotation_df.drop_duplicates(["unit_ids", "annotation"])
-            .groupby(["unit_ids", "annotation"])
-            .size()
-            .reset_index(name="count")
-            .query("count > 1")
+        annotations, tags, clustering_ids = (
+            ClusteringResultManager.load_clustering_results(self.output_dir)
         )
-        if len(annotation_df_multi) > 0:
-            raise ValueError(
-                "Clustering result has multiple annotations for the same unit."
-            )
-
-        annotation_df_multi_clustering_id = (
-            annotation_df.groupby(["unit_ids", "annotation"])
-            .size()
-            .reset_index(name="count")
-            .query("count > 1")
-        )
-        duplicated_clustering_ids = annotation_df[
-            annotation_df["unit_ids"].isin(
-                annotation_df_multi_clustering_id["unit_ids"]
-            )
-        ]["clustering_id"].unique()
-        if len(annotation_df_multi_clustering_id) > 0:
-            raise ValueError(
-                f"Duplicated clustering result with same annotations: {duplicated_clustering_ids}."
-            )
-        annotation_df = annotation_df.set_index("unit_ids")
-
-        # tags
-        tags_df = pd.concat(tags, axis=0)
-        tags_columns = tags_df.drop(columns=["unit_ids", "clustering_id"]).columns
-
-        tag_dfs = []
-        for tag_column in tqdm(
-            tags_columns, desc="Processing tags", bar_format=TQDM_FORMAT
-        ):
-            tag_df = tags_df[["unit_ids", tag_column]]
-            tag_df = tag_df[(~tag_df[tag_column].isna()) & (tag_df[tag_column] != "")]
-            tag_df = (
-                tag_df.groupby(["unit_ids"])[tag_column]
-                .apply(lambda x: "|".join([i for i in x if i != ""]))
-                .to_frame(name=tag_column)
-            )
-            tag_dfs.append(tag_df)
-        tags_df = pd.concat(tag_dfs, axis=1)
-
-        # summary_df = pd.concat([clustering_id_df, annotation_df, tags_df], axis=1)
+        annotation_df = ClusteringResultManager.process_annotations(annotations)
+        tags_df = ClusteringResultManager.process_tags(tags)
         summary_df = pd.concat([annotation_df, tags_df], axis=1)
         self.summary_df = (
             pd.DataFrame(index=self.unit_ids)
@@ -892,6 +773,147 @@ class ClusteringResultManager(BaseModel):
         )
         self.non_explicit_df = self.summary_df.query("annotation == ''")
         return self
+
+    @staticmethod
+    def load_clustering_sequence(output_dir: Union[str, Path]) -> list:
+        """
+        Load clustering sequence from file.
+        """
+        clustering_sequence_file = Path(output_dir) / "clustering_sequence.txt"
+
+        if not clustering_sequence_file.exists():
+            print("No clustering sequence found.")
+            return
+
+        with open(clustering_sequence_file, "r") as f:
+            clustering_sequence = [
+                line.strip() for line in f.readlines() if line.strip() != ""
+            ]
+        if len(clustering_sequence) == 0:
+            print("No clustering sequence found.")
+            return
+
+        n_clustering_ids = pd.Series(clustering_sequence).value_counts()
+        if n_clustering_ids.max() > 1:
+            raise ValueError(
+                f"Clustering sequence has multiple clustering ids:\n"
+                f"{n_clustering_ids[n_clustering_ids > 1]}"
+            )
+
+        return clustering_sequence
+
+    @staticmethod
+    def load_clustering_results(output_dir: Union[str, Path]) -> tuple:
+        """
+        Load clustering results from output directory.
+        """
+        clustering_sequence = ClusteringResultManager.load_clustering_sequence(
+            output_dir
+        )
+        annotations = []
+        tags = []
+        clustering_ids = []
+
+        for clustering_id in tqdm(
+            clustering_sequence,
+            desc="Loading clustering results",
+            bar_format=TQDM_FORMAT,
+        ):
+            clustering_file = output_dir / "clustering_results" / f"{clustering_id}.csv"
+            if not clustering_file.exists():
+                raise FileNotFoundError(f"Clustering result not found: {clustering_id}")
+            clustering_df = pd.read_csv(clustering_file)
+
+            # check if unit_ids is unique
+            if clustering_df["unit_ids"].duplicated().any():
+                raise ValueError(
+                    f"Clustering result has multiple unit ids: {clustering_id}"
+                )
+
+            # check if clustering_id is unique
+            unique_clustering_id = clustering_df["clustering_id"].unique()
+            if len(unique_clustering_id) > 1:
+                raise ValueError(
+                    f"Clustering result has multiple clustering ids: {clustering_id}"
+                )
+            clustering_id = unique_clustering_id[0]
+
+            # annotations
+            if "annotation" not in clustering_df.columns:
+                clustering_df["annotation"] = ""
+            annotation_df = clustering_df[["unit_ids", "annotation", "clustering_id"]]
+            annotation_df = annotation_df[
+                (annotation_df["annotation"].notna())
+                & (annotation_df["annotation"] != "")
+            ].drop_duplicates()
+            annotations.append(annotation_df)
+
+            # tags
+            tag_df = clustering_df.drop(columns=["annotation", "cluster_ids", "method"])
+            empty_tag_mask = (
+                tag_df.drop(columns=["clustering_id", "unit_ids"]).notna()
+            ).sum(axis=1) == 0
+            tag_df = tag_df[~empty_tag_mask]
+            tags.append(tag_df)
+
+            # clustering_id
+            clustering_df = clustering_df.drop(
+                columns=["clustering_id", "method"]
+            ).rename(columns={"cluster_ids": clustering_id})
+            clustering_df[clustering_id] = clustering_df[clustering_id].astype(str)
+            clustering_ids.append(clustering_df[["unit_ids", clustering_id]])
+
+        return annotations, tags, clustering_ids
+
+    @staticmethod
+    def process_annotations(annotations: list[pd.DataFrame]):
+        """
+        Process annotations from clustering results.
+        """
+        print("Processing annotations...")
+        annotation_df = pd.concat(annotations, axis=0)
+        annotation_df = annotation_df[
+            (annotation_df["annotation"].notna()) & (annotation_df["annotation"] != "")
+        ].drop_duplicates()
+
+        # check if unit_ids is unique
+        if annotation_df["unit_ids"].duplicated().any():
+            dup_unit_ids = annotation_df["unit_ids"][
+                annotation_df["unit_ids"].duplicated()
+            ]
+            dup_clustering_ids = annotation_df["clustering_id"][
+                annotation_df["unit_ids"].isin(dup_unit_ids)
+            ].unique()
+            raise ValueError(
+                f"Clustering results have multiple unit ids:\n{'\n'.join(dup_clustering_ids)}"
+            )
+
+        return annotation_df.set_index("unit_ids")
+
+    @staticmethod
+    def process_tags(tags: list[pd.DataFrame]):
+        """
+        Process tags from clustering results.
+        """
+        tags_df = pd.concat(tags, axis=0)
+        tags_columns = tags_df.drop(columns=["unit_ids", "clustering_id"]).columns
+
+        result_dict = {}
+        for tag_column in tqdm(
+            tags_columns, desc="Processing tags", bar_format=TQDM_FORMAT
+        ):
+            tag_df = tags_df[["unit_ids", tag_column]]
+            tag_df = tag_df[(tag_df[tag_column].notna()) & (tag_df[tag_column] != "")]
+            if not tag_df.empty:
+                result = tag_df.groupby("unit_ids")[tag_column].agg(
+                    lambda x: "|".join(sorted(set(x)))
+                )
+                result_dict[tag_column] = result
+
+        if result_dict:
+            return pd.DataFrame(result_dict)
+        else:
+            return pd.DataFrame()
 
 
 # ClusteringResultManager <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
