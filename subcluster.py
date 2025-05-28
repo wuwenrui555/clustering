@@ -1,4 +1,5 @@
 # %%
+import pickle
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Union
@@ -146,6 +147,35 @@ class ClusteringResult(BaseModel):
             clustering_id=clustering_id,
         )
 
+    @classmethod
+    def pop(cls, clustering_id: str, output_dir: Union[str, Path]):
+        """
+        Pop the clustering result from the stash.
+
+        Parameters:
+        -----------
+        clustering_id: str
+            The id of the clustering result to pop.
+        output_dir: Union[str, Path]
+            The directory to reload the clustering result. The stashed clustering
+            result was saved under the `clustering_stash` subdirectory.
+
+        Returns:
+        --------
+        ClusteringResult
+            The loaded clustering result instance.
+        """
+        output_dir = Path(output_dir)
+        input_file = output_dir / "clustering_stash" / f"{clustering_id}.pickle"
+
+        if not input_file.exists():
+            raise FileNotFoundError(
+                f"No clustering result found for id: {clustering_id}"
+            )
+
+        with open(input_file, "rb") as f:
+            return pickle.load(f)
+
     def add_annotation(self, annotation: dict[str, str]):
         """
         Add annotation to explicit clusters.
@@ -194,6 +224,30 @@ class ClusteringResult(BaseModel):
         # Add the tag column
         self.cluster_df[tag_name] = self.cluster_df["cluster_ids"].map(cluster_to_tag)
 
+    def stash(self, output_dir: Union[str, Path]):
+        """
+        Temporarily save the clustering result to a csv file.
+
+        Parameters:
+        -----------
+        output_dir: Union[str, Path]
+            The directory to store the clustering result. The clustering result
+            will be saved as `{self.clustering_id}.pickle` under the `clustering_stash`
+            subdirectory.
+        """
+        output_dir = Path(output_dir)
+        output_file = output_dir / "clustering_stash" / f"{self.clustering_id}.pickle"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, "wb") as f:
+            pickle.dump(self, f)
+        print(
+            f"To reload the stashed clustering result:"
+            f"\nClusteringResult.pop("
+            f"\n    clustering_id='{self.clustering_id}',"
+            f"\n    output_dir='{output_dir}'"
+            f"\n)"
+        )
+
     def save(self, output_dir: Union[str, Path]):
         """
         Save the clustering result to a csv file.
@@ -231,19 +285,31 @@ def run_clustering(
     features: list[str],
     method: str = "phenograph",
     method_params: Dict[str, Any] | None = None,
+    output_dir: Union[str, Path] = None,
 ) -> ClusteringResult:
     """
     Run clustering on the given data.
     """
     match method:
         case "phenograph":
-            return _run_clustering_phenograph(adata, unit_ids, features, method_params)
+            clustering_result = _run_clustering_phenograph(
+                adata, unit_ids, features, method_params
+            )
         case "kmeans":
-            return _run_clustering_kmeans(adata, unit_ids, features, method_params)
+            clustering_result = _run_clustering_kmeans(
+                adata, unit_ids, features, method_params
+            )
         case "leiden":
-            return _run_clustering_leiden(adata, unit_ids, features, method_params)
+            clustering_result = _run_clustering_leiden(
+                adata, unit_ids, features, method_params
+            )
         case _:
             raise ValueError(f"Method {method} not supported.")
+
+    if output_dir is not None:
+        clustering_result.stash(output_dir)
+
+    return clustering_result
 
 
 def _run_clustering_phenograph(
@@ -355,12 +421,12 @@ def _run_clustering_leiden(
 
 PRESET_HEATMAP_KWARGS = {
     "row_cluster": False,
-    "col_cluster": True,
+    "col_cluster": False,
     "show_rownames": True,
     "show_colnames": True,
     "row_names_side": "right",
     "col_names_side": "bottom",
-    "col_dendrogram": True,
+    "col_dendrogram": False,
     "col_dendrogram_size": 15,
     "tree_kws": {"colors": "blue"},
     "cmap": "RdBu_r",
@@ -454,39 +520,39 @@ def _plot_clustering_heatmap(
     cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
 
     if x_label == "cluster":
-        pass
-    elif x_label in clustering_result.cluster_df.columns:
-        if x_label == "annotation":
-            columns = ["annotation", "cluster_ids"]
-        elif "annotation" in clustering_result.cluster_df.columns:
-            columns = [x_label, "annotation", "cluster_ids"]
-        else:
-            columns = [x_label, "cluster_ids"]
-        x_label_df = clustering_result.cluster_df[columns].drop_duplicates()
-
-        for i, column in enumerate(columns):
-            if i == 0:
-                new_labels = x_label_df[column]
-            else:
-                new_labels[new_labels == ""] = x_label_df.loc[new_labels == "", column]
-        x_label_df = pd.DataFrame(
-            {"x_label": new_labels, "cluster_ids": x_label_df["cluster_ids"]}
-        ).set_index("cluster_ids")
-
-        # Handle duplicate x_labels by appending numbers
-        x_label_df["x_label"] = x_label_df.groupby("x_label")["x_label"].transform(
-            lambda x: x if len(x) == 1 else [f"{v}({i + 1})" for i, v in enumerate(x)]
-        )
-        x_label_dict = x_label_df["x_label"].to_dict()
-
-        heatmap_df.columns = heatmap_df.columns.map(x_label_dict)
-        cluster_count.index = cluster_count.index.map(x_label_dict)
-        cluster_mean_cellsize.index = cluster_mean_cellsize.index.map(x_label_dict)
-
+        columns = ["cluster_ids"]
+    elif x_label == "annotation":
+        columns = ["annotation", "cluster_ids"]
     else:
-        raise ValueError(
-            f"Invalid x_label: {x_label}. Must be one of: cluster, annotation, tag"
-        )
+        columns = [x_label, "annotation", "cluster_ids"]
+    columns = [col for col in columns if col in clustering_result.cluster_df.columns]
+    x_label_df = clustering_result.cluster_df[columns].drop_duplicates()
+
+    for i, column in enumerate(columns):
+        if i == 0:
+            new_labels = x_label_df[column]
+        else:
+            new_labels[new_labels == ""] = x_label_df.loc[new_labels == "", column]
+    x_label_df = pd.DataFrame(
+        {"x_label": new_labels, "cluster_ids": x_label_df["cluster_ids"]}
+    ).set_index("cluster_ids")
+
+    # Handle duplicate x_labels by appending numbers
+    x_label_df["x_label"] = x_label_df.groupby("x_label")["x_label"].transform(
+        lambda x: x if len(x) == 1 else [f"{v}({i + 1})" for i, v in enumerate(x)]
+    )
+    x_label_dict = x_label_df["x_label"].to_dict()
+
+    heatmap_df.columns = heatmap_df.columns.map(x_label_dict)
+    try:
+        columns_order = sorted([int(i) for i in set(heatmap_df.columns)])
+    except ValueError:
+        columns_order = sorted(set(heatmap_df.columns))
+    columns_order = [str(i) for i in columns_order]
+    heatmap_df = heatmap_df[columns_order]
+
+    cluster_count.index = cluster_count.index.map(x_label_dict)
+    cluster_mean_cellsize.index = cluster_mean_cellsize.index.map(x_label_dict)
 
     col_ha = pch.HeatmapAnnotation(
         cell_count=pch.anno_barplot(
@@ -694,127 +760,11 @@ class ClusteringResultManager(BaseModel):
         self.output_dir = Path(self.output_dir)
         (self.output_dir / "clustering_results").mkdir(parents=True, exist_ok=True)
 
-        clustering_sequence_file = self.output_dir / "clustering_sequence.txt"
-
-        # Load clustering sequence if exists
-        if clustering_sequence_file.exists():
-            with open(clustering_sequence_file, "r") as f:
-                clustering_sequence = [line.strip() for line in f.readlines()]
-        else:
-            print("No clustering results found.")
-            return self
-
-        clustering_ids = []
-        annotations = []
-        tags = []
-        for clustering_id in tqdm(
-            clustering_sequence,
-            desc="Loading clustering results",
-            bar_format=TQDM_FORMAT,
-        ):
-            clustering_file = (
-                self.output_dir / "clustering_results" / f"{clustering_id}.csv"
-            )
-            if not clustering_file.exists():
-                raise FileNotFoundError(f"Clustering result not found: {clustering_id}")
-            clustering_df = pd.read_csv(clustering_file)
-
-            # check if unit_ids is unique
-            if clustering_df["unit_ids"].duplicated().any():
-                raise ValueError(
-                    "Clustering result has multiple unit ids: {clustering_id}"
-                )
-
-            # check if clustering_id is unique
-            clustering_id = clustering_df["clustering_id"].unique()
-            if len(clustering_id) > 1:
-                raise ValueError(
-                    f"Clustering result has multiple clustering ids: {clustering_id}"
-                )
-            else:
-                clustering_id = clustering_id[0]
-
-            # annotations
-            if "annotation" not in clustering_df.columns:
-                clustering_df["annotation"] = ""
-            annotations.append(
-                clustering_df[["unit_ids", "annotation", "clustering_id"]]
-            )
-
-            # tags
-            tags.append(
-                clustering_df.drop(columns=["annotation", "cluster_ids", "method"])
-            )
-
-            # clustering_id
-            clustering_df = clustering_df.drop(
-                columns=["clustering_id", "method"]
-            ).rename(columns={"cluster_ids": clustering_id})
-            clustering_df[clustering_id] = clustering_df[clustering_id].astype(str)
-            clustering_ids.append(clustering_df[["unit_ids", clustering_id]])
-
-        # latest cluster id
-        # clustering_ids = [
-        #     clustering_id.set_index("unit_ids") for clustering_id in clustering_ids
-        # ]
-        # clustering_id_df = pd.concat(clustering_ids, axis=1).fillna("")
-        # clustering_id_df["latest_cluster_id"] = clustering_id_df.apply(
-        #     lambda x: "|".join([i for i in x if i != ""]), axis=1
-        # )
-
-        # annotation
-        annotation_df = pd.concat(annotations, axis=0)
-        annotation_df = annotation_df[
-            (~annotation_df["annotation"].isna()) & (annotation_df["annotation"] != "")
-        ].drop_duplicates()
-        annotation_df_multi = (
-            annotation_df.drop_duplicates(["unit_ids", "annotation"])
-            .groupby(["unit_ids", "annotation"])
-            .size()
-            .reset_index(name="count")
-            .query("count > 1")
+        annotations, tags, clustering_ids = (
+            ClusteringResultManager.load_clustering_results(self.output_dir)
         )
-        if len(annotation_df_multi) > 0:
-            raise ValueError(
-                "Clustering result has multiple annotations for the same unit."
-            )
-
-        annotation_df_multi_clustering_id = (
-            annotation_df.groupby(["unit_ids", "annotation"])
-            .size()
-            .reset_index(name="count")
-            .query("count > 1")
-        )
-        duplicated_clustering_ids = annotation_df[
-            annotation_df["unit_ids"].isin(
-                annotation_df_multi_clustering_id["unit_ids"]
-            )
-        ]["clustering_id"].unique()
-        if len(annotation_df_multi_clustering_id) > 0:
-            raise ValueError(
-                f"Duplicated clustering result with same annotations: {duplicated_clustering_ids}."
-            )
-        annotation_df = annotation_df.set_index("unit_ids")
-
-        # tags
-        tags_df = pd.concat(tags, axis=0)
-        tags_columns = tags_df.drop(columns=["unit_ids", "clustering_id"]).columns
-
-        tag_dfs = []
-        for tag_column in tqdm(
-            tags_columns, desc="Processing tags", bar_format=TQDM_FORMAT
-        ):
-            tag_df = tags_df[["unit_ids", tag_column]]
-            tag_df = tag_df[(~tag_df[tag_column].isna()) & (tag_df[tag_column] != "")]
-            tag_df = (
-                tag_df.groupby(["unit_ids"])[tag_column]
-                .apply(lambda x: "|".join([i for i in x if i != ""]))
-                .to_frame(name=tag_column)
-            )
-            tag_dfs.append(tag_df)
-        tags_df = pd.concat(tag_dfs, axis=1)
-
-        # summary_df = pd.concat([clustering_id_df, annotation_df, tags_df], axis=1)
+        annotation_df = ClusteringResultManager.process_annotations(annotations)
+        tags_df = ClusteringResultManager.process_tags(tags)
         summary_df = pd.concat([annotation_df, tags_df], axis=1)
         self.summary_df = (
             pd.DataFrame(index=self.unit_ids)
@@ -823,6 +773,147 @@ class ClusteringResultManager(BaseModel):
         )
         self.non_explicit_df = self.summary_df.query("annotation == ''")
         return self
+
+    @staticmethod
+    def load_clustering_sequence(output_dir: Union[str, Path]) -> list:
+        """
+        Load clustering sequence from file.
+        """
+        clustering_sequence_file = Path(output_dir) / "clustering_sequence.txt"
+
+        if not clustering_sequence_file.exists():
+            print("No clustering sequence found.")
+            return
+
+        with open(clustering_sequence_file, "r") as f:
+            clustering_sequence = [
+                line.strip() for line in f.readlines() if line.strip() != ""
+            ]
+        if len(clustering_sequence) == 0:
+            print("No clustering sequence found.")
+            return
+
+        n_clustering_ids = pd.Series(clustering_sequence).value_counts()
+        if n_clustering_ids.max() > 1:
+            raise ValueError(
+                f"Clustering sequence has multiple clustering ids:\n"
+                f"{n_clustering_ids[n_clustering_ids > 1]}"
+            )
+
+        return clustering_sequence
+
+    @staticmethod
+    def load_clustering_results(output_dir: Union[str, Path]) -> tuple:
+        """
+        Load clustering results from output directory.
+        """
+        clustering_sequence = ClusteringResultManager.load_clustering_sequence(
+            output_dir
+        )
+        annotations = []
+        tags = []
+        clustering_ids = []
+
+        for clustering_id in tqdm(
+            clustering_sequence,
+            desc="Loading clustering results",
+            bar_format=TQDM_FORMAT,
+        ):
+            clustering_file = output_dir / "clustering_results" / f"{clustering_id}.csv"
+            if not clustering_file.exists():
+                raise FileNotFoundError(f"Clustering result not found: {clustering_id}")
+            clustering_df = pd.read_csv(clustering_file)
+
+            # check if unit_ids is unique
+            if clustering_df["unit_ids"].duplicated().any():
+                raise ValueError(
+                    f"Clustering result has multiple unit ids: {clustering_id}"
+                )
+
+            # check if clustering_id is unique
+            unique_clustering_id = clustering_df["clustering_id"].unique()
+            if len(unique_clustering_id) > 1:
+                raise ValueError(
+                    f"Clustering result has multiple clustering ids: {clustering_id}"
+                )
+            clustering_id = unique_clustering_id[0]
+
+            # annotations
+            if "annotation" not in clustering_df.columns:
+                clustering_df["annotation"] = ""
+            annotation_df = clustering_df[["unit_ids", "annotation", "clustering_id"]]
+            annotation_df = annotation_df[
+                (annotation_df["annotation"].notna())
+                & (annotation_df["annotation"] != "")
+            ].drop_duplicates()
+            annotations.append(annotation_df)
+
+            # tags
+            tag_df = clustering_df.drop(columns=["annotation", "cluster_ids", "method"])
+            empty_tag_mask = (
+                tag_df.drop(columns=["clustering_id", "unit_ids"]).notna()
+            ).sum(axis=1) == 0
+            tag_df = tag_df[~empty_tag_mask]
+            tags.append(tag_df)
+
+            # clustering_id
+            clustering_df = clustering_df.drop(
+                columns=["clustering_id", "method"]
+            ).rename(columns={"cluster_ids": clustering_id})
+            clustering_df[clustering_id] = clustering_df[clustering_id].astype(str)
+            clustering_ids.append(clustering_df[["unit_ids", clustering_id]])
+
+        return annotations, tags, clustering_ids
+
+    @staticmethod
+    def process_annotations(annotations: list[pd.DataFrame]):
+        """
+        Process annotations from clustering results.
+        """
+        print("Processing annotations...")
+        annotation_df = pd.concat(annotations, axis=0)
+        annotation_df = annotation_df[
+            (annotation_df["annotation"].notna()) & (annotation_df["annotation"] != "")
+        ].drop_duplicates()
+
+        # check if unit_ids is unique
+        if annotation_df["unit_ids"].duplicated().any():
+            dup_unit_ids = annotation_df["unit_ids"][
+                annotation_df["unit_ids"].duplicated()
+            ]
+            dup_clustering_ids = annotation_df["clustering_id"][
+                annotation_df["unit_ids"].isin(dup_unit_ids)
+            ].unique()
+            raise ValueError(
+                f"Clustering results have multiple unit ids:\n{'\n'.join(dup_clustering_ids)}"
+            )
+
+        return annotation_df.set_index("unit_ids")
+
+    @staticmethod
+    def process_tags(tags: list[pd.DataFrame]):
+        """
+        Process tags from clustering results.
+        """
+        tags_df = pd.concat(tags, axis=0)
+        tags_columns = tags_df.drop(columns=["unit_ids", "clustering_id"]).columns
+
+        result_dict = {}
+        for tag_column in tqdm(
+            tags_columns, desc="Processing tags", bar_format=TQDM_FORMAT
+        ):
+            tag_df = tags_df[["unit_ids", tag_column]]
+            tag_df = tag_df[(tag_df[tag_column].notna()) & (tag_df[tag_column] != "")]
+            if not tag_df.empty:
+                result = tag_df.groupby("unit_ids")[tag_column].agg(
+                    lambda x: "|".join(sorted(set(x)))
+                )
+                result_dict[tag_column] = result
+
+        if result_dict:
+            return pd.DataFrame(result_dict)
+        else:
+            return pd.DataFrame()
 
 
 # ClusteringResultManager <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
