@@ -7,6 +7,8 @@ from tqdm import tqdm
 
 from subcluster import (
     ClusteringResultManager,
+    plot_clustering_heatmap,
+    ClusteringResult,
 )
 
 TQDM_FORMAT = "{desc}: {percentage:3.0f}%|{bar:30}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
@@ -69,5 +71,69 @@ for geojson_file in tqdm(
     output_file = output_dir / "geojson" / geojson_file.name
     output_file.parent.mkdir(parents=True, exist_ok=True)
     geojson.output_geojson(output_file)
+
+# %%
+adata = ad.read_h5ad(
+    "/mnt/nfs/home/wenruiwu/projects/bidmc-jiang-rcc/output/data/20250527_annotation/adata_with_annotation.h5ad"
+)
+adata
+
+# %%
+anno_dict = {
+    "CD8T": "01  CD8T",
+    "CD4T": "02  CD4T",
+    "Treg": "03  Treg",
+    "dnT": "04  dnT",
+    "B": "05  B",
+    "M1": "06  M1",
+    "M2": "07  M2",
+    "Neutrophil": "08  Neutrophil",
+    "Monocyte": "09  Monocyte",
+    "DC": "10  DC",
+    "Epi": "11  Epithelial",
+    "Endo_Vas": "12  Endo_Vas",
+    "Endo_Lym": "13  Endo_Lym",
+    "Fibro": "14  Fibroblast",
+    "nothing": "15  nothing",
+}
+adata.obs["annotation"] = adata.obs["annotation"].map(anno_dict)
+
+clustering_result = ClusteringResult(
+    clustering_id="summary",
+    method="summary",
+    unit_ids=adata.obs.index,
+    cluster_ids=adata.obs["annotation"],
+)
+
+markers_all = [
+    "CD45",
+    "CD3e",
+    "CD8",
+    "CD4",
+    "FoxP3",
+    "CD20",
+    "CD68",
+    "CD163",
+    "CD16",
+    "CD11b",
+    "CD11c",
+    "MPO",
+    "Cytokeratin",
+    "CD31",
+    "Podoplanin",
+    "aSMA",
+]
+
+# %%
+fig = plot_clustering_heatmap(
+    adata,
+    clustering_result,
+    markers_all,
+    plot_value="zscore",
+    figsize=(8, 8),
+    vmin=-2,
+    center=0,
+    vmax=2,
+)
 
 # %%
