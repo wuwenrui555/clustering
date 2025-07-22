@@ -1,5 +1,14 @@
 # Clustering
 
+## Installation
+
+```sh
+conda create -y -n clustering_3.11 python=3.11
+conda activate clustering_3.1
+
+pip install git+https://github.com/wuwenrui555/clustering.git@v0.1.0
+```
+
 ## `ClusteringResultManager`
 
 ```python
