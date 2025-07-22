@@ -927,7 +927,44 @@ def update_geojson_from_clustering_result(
     geojson_file: Union[str, Path],
     clustering_result: ClusteringResult,
     output_dir: Union[str, Path],
+    unit_id_prefix: str = "",
 ):
+    """
+    Update a GeoJSON file with clustering results and save to output directory.
+
+    This function loads a GeoJSON file containing cell annotations, applies clustering
+    results to update cell classifications, and saves the updated GeoJSON file to
+    a structured output directory.
+
+    Parameters
+    ----------
+    geojson_file : Union[str, Path]
+        Path to the input GeoJSON file containing cell annotations.
+    clustering_result : ClusteringResult
+        ClusteringResult object containing unit IDs and their assigned cluster IDs.
+    output_dir : Union[str, Path]
+        Directory where the updated GeoJSON file will be saved. The file will be
+        saved under `output_dir/geojson/{clustering_id}/filename.geojson`.
+    unit_id_prefix : str, optional
+        Prefix to filter unit IDs in the clustering result. Only units with IDs
+        starting with this prefix will be processed. The prefix will be removed
+        from unit IDs when matching with GeoJSON cell names. Default is "".
+
+    Raises
+    ------
+    ImportError
+        If pyqupath package is not installed.
+
+    Notes
+    -----
+    - The function filters clustering results to only include units matching the
+      unit_id_prefix, which is useful for distinguishing cells from different FOVs.
+    - Unit IDs in clustering results are matched with cell names in the GeoJSON file.
+    - Only cells that exist in both the clustering result and GeoJSON file are
+      updated and included in the output.
+    - The output file maintains the same filename as the input but is saved in a
+      structured directory under the clustering ID.
+    """
     try:
         from pyqupath.geojson import GeojsonProcessor
     except ImportError:
@@ -935,21 +972,28 @@ def update_geojson_from_clustering_result(
             "pyqupath is not installed. Please install it using `pip install git+https://github.com/wuwenrui555/pyqupath.git@v0.0.5`."
         )
 
+    # Load the geojson file
     geojson_file = Path(geojson_file)
     geojson = GeojsonProcessor.from_path(geojson_file)
 
-    cluster_df = clustering_result.cluster_df[["unit_ids", "cluster_ids"]].copy()
-    cluster_df["id"] = cluster_df["unit_ids"].str.split(r"_(?=c\d)").str[0]
-    cluster_df["cell_label"] = cluster_df["unit_ids"].str.split(r"_c(?=\d)").str[1]
-    name_dict = (
-        cluster_df[cluster_df["id"] == geojson_file.stem]
-        .set_index("cell_label")["cluster_ids"]
-        .to_dict()
+    # filter cluster_df to only include units that match the unit_id_prefix
+    # (to distinguish from different FOVs)
+    idx_geojson = clustering_result.cluster_df.unit_ids.str.startswith(unit_id_prefix)
+    cluster_df = clustering_result.cluster_df.loc[idx_geojson][
+        ["unit_ids", "cluster_ids"]
+    ].copy()
+    cluster_df.unit_ids = cluster_df.unit_ids.str.replace(
+        unit_id_prefix, "", regex=False
     )
+
+    # create a dictionary to map unit_ids to cluster_ids
+    name_dict = cluster_df.set_index("unit_ids")["cluster_ids"].to_dict()
+
     # select the cells involved in the clustering
-    geojson.gdf = geojson.gdf[geojson.gdf["name"].isin(name_dict.keys())]
+    geojson.gdf = geojson.gdf[geojson.gdf["name"].isin(name_dict.keys())].copy()
     geojson.update_classification(name_dict)
 
+    # update the geojson file with the clustering result
     output_dir = Path(output_dir)
     output_file = (
         output_dir / "geojson" / clustering_result.clustering_id / geojson_file.name
@@ -959,68 +1003,3 @@ def update_geojson_from_clustering_result(
 
 
 # Custom functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-# %%
-if __name__ == "__main__":
-    # %%
-    markers_all = [
-        "CD45",
-        "CD3e",
-        "CD8",
-        "CD4",
-        "FoxP3",
-        "CD20",
-        "CD68",
-        "CD163",
-        "CD16",
-        "CD11b",
-        "MPO",
-        "Cytokeratin",
-        "CD31",
-        "Podoplanin",
-        "aSMA",
-    ]
-    adata = ad.read_h5ad("input/data_demo.h5ad")[0:1000].copy()
-    # unit_ids = adata.obs.index[0:1000].tolist()
-    features = markers_all
-
-    manager = ClusteringResultManager(
-        output_dir="output/clustering_demo", unit_ids=adata.obs.index
-    )
-    manager.summary_df
-
-    # %%
-    clustering_result = ClusteringResult(
-        clustering_id="1",
-        method="1",
-        unit_ids=manager.summary_df.index,
-        cluster_ids=manager.summary_df["annotation"],
-    )
-    # %%
-    # %%
-    fig = plot_clustering_heatmap(
-        adata,
-        clustering_result,
-        features,
-        plot_value="mean",
-        figsize=(10, 8),
-    )
-    # %%
-    fig = plot_clustering_heatmap(
-        adata,
-        clustering_result,
-        features,
-        plot_value="mean",
-        figsize=(10, 8),
-        z_score=0,
-        cmap="RdBu_r",
-    )
-    # %%
-    fig = plot_clustering_heatmap(
-        adata,
-        clustering_result,
-        features,
-        plot_value="zscore",
-        figsize=(10, 8),
-    )
-# %%
