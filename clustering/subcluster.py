@@ -774,9 +774,13 @@ class ClusteringResultManager(BaseModel):
         self.output_dir = Path(self.output_dir)
         (self.output_dir / "clustering_results").mkdir(parents=True, exist_ok=True)
 
-        annotations, tags, clustering_ids = (
-            ClusteringResultManager.load_clustering_results(self.output_dir)
-        )
+        results = ClusteringResultManager.load_clustering_results(self.output_dir)
+
+        if results is None:
+            return self
+        else:
+            annotations, tags, clustering_ids = results
+
         annotation_df = ClusteringResultManager.process_annotations(annotations)
         tags_df = ClusteringResultManager.process_tags(tags)
         summary_df = pd.concat([annotation_df, tags_df], axis=1)
@@ -824,6 +828,11 @@ class ClusteringResultManager(BaseModel):
         clustering_sequence = ClusteringResultManager.load_clustering_sequence(
             output_dir
         )
+
+        if clustering_sequence is None:
+            print("No clustering sequence found.")
+            return
+
         annotations = []
         tags = []
         clustering_ids = []
