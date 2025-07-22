@@ -884,8 +884,9 @@ class ClusteringResultManager(BaseModel):
             dup_clustering_ids = annotation_df["clustering_id"][
                 annotation_df["unit_ids"].isin(dup_unit_ids)
             ].unique()
+            text_dup_clustering_ids = "\n".join(dup_clustering_ids)
             raise ValueError(
-                f"Clustering results have multiple unit ids:\n{'\n'.join(dup_clustering_ids)}"
+                f"Clustering results have multiple unit ids:\n{text_dup_clustering_ids}"
             )
 
         return annotation_df.set_index("unit_ids")
