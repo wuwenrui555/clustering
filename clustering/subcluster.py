@@ -444,6 +444,7 @@ def _plot_clustering_heatmap(
     plot_value: str = "zscore",
     x_label: str = "cluster",
     preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    col_cellsize: str = "cell_size",
     **kwargs: dict[str, Any],
 ) -> pch.ClusterMapPlotter:
     """
@@ -474,6 +475,8 @@ def _plot_clustering_heatmap(
     preset_heatmap_kwargs : str, optional
         Name of preset kwargs dict for PyComplexHeatmap.ClusterMapPlotter.
         Default is "PRESET_HEATMAP_KWARGS".
+    col_cellsize : str, optional
+        Column name in the metadata for cell size, by default "cell_size".
     **kwargs : dict[str, Any]
         Additional kwargs passed to PyComplexHeatmap.ClusterMapPlotter.
         Common options include:
@@ -517,7 +520,9 @@ def _plot_clustering_heatmap(
         raise ValueError(f"Invalid plot_value: {plot_value}")
 
     cluster_count = pd.Series(cluster_ids).value_counts().to_frame(name="count")
-    cluster_mean_cellsize = metadata.groupby(cluster_ids)["cellSize"].mean().to_frame()
+    cluster_mean_cellsize = (
+        metadata.groupby(cluster_ids)[col_cellsize].mean().to_frame()
+    )
 
     if x_label == "cluster":
         columns = ["cluster_ids"]
@@ -580,6 +585,7 @@ def plot_clustering_heatmap(
     plot_value: str = "zscore",
     x_label: str = "cluster",
     preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    col_cellsize: str = "cell_size",
     **kwargs: dict[str, Any],
 ) -> plt.Figure:
     """
@@ -605,6 +611,8 @@ def plot_clustering_heatmap(
         the x-axis labels.
     preset_heatmap_kwargs : str, optional
         Name of preset kwargs for heatmap, by default "PRESET_HEATMAP_KWARGS".
+    col_cellsize : str, optional
+        Column name in the metadata for cell size, by default "cell_size".
     **kwargs : dict[str, Any]
         Additional kwargs passed to PyComplexHeatmap.ClusterMapPlotter.
 
@@ -623,6 +631,7 @@ def plot_clustering_heatmap(
         plot_value=plot_value,
         x_label=x_label,
         preset_heatmap_kwargs=preset_heatmap_kwargs,
+        col_cellsize=col_cellsize,
         **kwargs,
     )
 
@@ -643,6 +652,7 @@ def plot_clustering_heatmap_2(
     col_gap: int = 30,
     legend_hpad: int = 50,
     preset_heatmap_kwargs: str = "PRESET_HEATMAP_KWARGS",
+    col_cellsize: str = "cell_size",
     kwargs_zscore: dict[str, Any] = {},
     kwargs_mean: dict[str, Any] = {},
 ) -> plt.Figure:
@@ -671,6 +681,8 @@ def plot_clustering_heatmap_2(
         Horizontal padding for legends in pixels, by default 50.
     preset_heatmap_kwargs : str, optional
         Name of preset kwargs for heatmap, by default "PRESET_HEATMAP_KWARGS".
+    col_cellsize : str, optional
+        Column name in the metadata for cell size, by default "cell_size".
     kwargs_zscore : dict[str, Any], optional
         Additional kwargs for z-score heatmap, by default {}.
     kwargs_mean : dict[str, Any], optional
@@ -691,6 +703,7 @@ def plot_clustering_heatmap_2(
         plot_value="zscore",
         x_label=x_label,
         preset_heatmap_kwargs=preset_heatmap_kwargs,
+        col_cellsize=col_cellsize,
         **kwargs_zscore,
     )
 
@@ -701,6 +714,7 @@ def plot_clustering_heatmap_2(
         plot_value="mean",
         x_label=x_label,
         preset_heatmap_kwargs=preset_heatmap_kwargs,
+        col_cellsize=col_cellsize,
         **kwargs_mean,
     )
 
