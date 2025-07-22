@@ -1,5 +1,5 @@
 [project]
-name = "subclustering"
+name = "clustering"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -9,7 +9,7 @@ dependencies = [
     "ipykernel>=6.29.5",
     "numpy>=2.1.3",
     "pandas>=2.2.3",
-    "phenograph>=1.5.7",
+    "phenograph",
     "pycomplexheatmap>=1.8.2",
     "pydantic>=2.11.2",
     "pyqupath",
@@ -20,3 +20,4 @@ dependencies = [
 [tool.uv.sources]
 anndata = { git = "https://github.com/scverse/anndata.git" }
 pyqupath = { git = "https://github.com/wuwenrui555/pyqupath.git", rev = "v0.0.5" }
+phenograph = { git = "https://github.com/wuwenrui555/PhenoGraph.git", rev = "fix_n_jobs" }
